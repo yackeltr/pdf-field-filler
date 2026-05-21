@@ -155,6 +155,23 @@ npm test
 
 Vitest runs against synthetic in-memory fixture PDFs — no external files are required.
 
+## Known limitations
+
+These are deliberate scope boundaries, not bugs. They are unlikely to change.
+
+- **XFA forms are detected, not edited.** If a PDF uses XFA, responses carry `has_xfa: true` and `xfa_supported: false`. The server will not mutate XFA streams. Mixed AcroForm+XFA PDFs are listed normally with a warning that AcroForm fields may not represent the full form.
+- **No flattening, no signing.** Filled PDFs remain editable. The human signs manually in a desktop PDF app.
+- **No network.** The server reads and writes local files only. There is no telemetry, no OpenAI/Anthropic call, no cloud sync.
+- **`ALLOWED_DIRS` sandbox.** Every path argument must resolve (via `realpath`) inside the configured allowed directories. Symlinks are followed and re-checked. Defaults: `~/Downloads` and `~/Documents`.
+- **Encrypted PDFs are refused.** A password-protected PDF returns `PDF_ENCRYPTED`. Decrypt manually in another tool first.
+- **PDF size cap.** The server refuses inputs over `PDF_FIELD_FILLER_MAX_BYTES` (default 100 MB) with `PDF_TOO_LARGE`. Raise the cap by setting the env var in the Claude Desktop MCP config block.
+- **AcroForm tree limits.** The walker caps tree depth at 64 and total node count at 100,000 to guard against pathological or adversarial PDFs. Real-world forms (including multi-hundred-field government forms) fit well under both.
+- **Single-user / sequential.** Two concurrent fills to the same `output_path` are not isolated. The atomic-rename + backup pattern is correct for sequential calls.
+- **Rendering depends on the viewer.** The server writes spec-conformant `/V` and `/AS` values; appearance streams come from the PDF's own `/AP/N` entries. A viewer that does not honor those entries (or a PDF whose appearance dict is incomplete) may render the wrong state.
+- **`fill` cannot fill flat scans.** A PDF without AcroForm fields is a success response with `has_fields: false` and `field_count: 0`. There is nothing to fill.
+
+For deferred internal-quality work, see [ROADMAP.md](ROADMAP.md). Open issues are tracked at the [project issues page](https://github.com/yackeltr/pdf-field-filler/issues).
+
 ## Troubleshooting (Claude Desktop)
 
 1. **Server not appearing in Claude Desktop.** Confirm the config path is exactly `~/Library/Application Support/Claude/claude_desktop_config.json`. Validate JSON syntax.
