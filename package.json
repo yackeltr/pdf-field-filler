@@ -1,6 +1,6 @@
 {
   "name": "pdf-field-filler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local MCP server for safely inspecting and filling AcroForm PDFs.",
   "license": "MIT",
   "author": "Tom Yackel",
@@ -24,7 +24,8 @@
     "test:watch": "vitest",
     "inspect": "node dist/cli.js inspect",
     "dry-run": "node dist/cli.js dry-run",
-    "validate": "node dist/cli.js validate"
+    "validate": "node dist/cli.js validate",
+    "export-map": "node dist/cli.js export-map"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

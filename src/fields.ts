@@ -61,6 +61,8 @@ export interface FieldExtractionResult {
   has_fields: boolean;
   field_count: number;
   fields: FieldInfo[];
+  has_xfa: boolean;
+  xfa_supported: boolean;
   message?: string;
 }
 
@@ -222,35 +224,21 @@ function lookupInDict(dict: PDFDict, key: string): PDFObject | undefined {
 function inheritedFor(fieldStack: PDFDict[]): InheritedAttrs {
   const out: InheritedAttrs = {};
   for (const d of fieldStack) {
-    if (out.FT === undefined) {
-      const ft = lookupInDict(d, "FT");
-      if (ft instanceof PDFName) out.FT = ft.decodeText();
-    }
-    if (out.Ff === undefined) {
-      const ff = lookupInDict(d, "Ff");
-      if (ff instanceof PDFNumber) out.Ff = ff.asNumber();
-    }
-    if (out.V === undefined) {
-      const v = lookupInDict(d, "V");
-      if (v) out.V = v;
-    }
-    if (out.DV === undefined) {
-      const v = lookupInDict(d, "DV");
-      if (v) out.DV = v;
-    }
-    if (out.Opt === undefined) {
-      const v = lookupInDict(d, "Opt");
-      if (v) out.Opt = v;
-    }
-    if (out.MaxLen === undefined) {
-      const v = lookupInDict(d, "MaxLen");
-      if (v instanceof PDFNumber) out.MaxLen = v.asNumber();
-    }
-    if (out.DA === undefined) {
-      const v = lookupInDict(d, "DA");
-      const s = asString(v);
-      if (s !== undefined) out.DA = s;
-    }
+    const ft = lookupInDict(d, "FT");
+    if (ft instanceof PDFName) out.FT = ft.decodeText();
+    const ff = lookupInDict(d, "Ff");
+    if (ff instanceof PDFNumber) out.Ff = ff.asNumber();
+    const v = lookupInDict(d, "V");
+    if (v) out.V = v;
+    const dv = lookupInDict(d, "DV");
+    if (dv) out.DV = dv;
+    const opt = lookupInDict(d, "Opt");
+    if (opt) out.Opt = opt;
+    const ml = lookupInDict(d, "MaxLen");
+    if (ml instanceof PDFNumber) out.MaxLen = ml.asNumber();
+    const da = lookupInDict(d, "DA");
+    const dasStr = asString(da);
+    if (dasStr !== undefined) out.DA = dasStr;
   }
   return out;
 }
@@ -606,8 +594,7 @@ function walkFields(
         const kd = kids.lookup(k);
         if (kd instanceof PDFDict) {
           const hasT = !!kd.get(PDFName.of("T"));
-          const isWidget = isWidgetDict(kd);
-          if (hasT && !isWidget) return true;
+          if (hasT) return true;
         }
       }
       return false;
@@ -630,14 +617,26 @@ function walkFields(
   }
 }
 
+function detectXfa(af: PDFDict | null): boolean {
+  if (!af) return false;
+  const xfa = af.get(PDFName.of("XFA"));
+  return xfa !== undefined && xfa !== null;
+}
+
+const XFA_NOTICE =
+  "XFA was detected. This server supports AcroForm inspection/filling only and will not mutate XFA.";
+
 export async function extractFields(pdfPath: string): Promise<FieldExtractionResult> {
   const doc = await loadPdf(pdfPath);
   const af = getAcroFormDict(doc);
+  const has_xfa = detectXfa(af);
   if (!af) {
     return {
       has_fields: false,
       field_count: 0,
       fields: [],
+      has_xfa: false,
+      xfa_supported: false,
       message: "This PDF has zero AcroForm fields. It may be a flat scan or non-fillable PDF.",
     };
   }
@@ -647,7 +646,11 @@ export async function extractFields(pdfPath: string): Promise<FieldExtractionRes
       has_fields: false,
       field_count: 0,
       fields: [],
-      message: "This PDF has zero AcroForm fields. It may be a flat scan or non-fillable PDF.",
+      has_xfa,
+      xfa_supported: false,
+      message: has_xfa
+        ? XFA_NOTICE
+        : "This PDF has zero AcroForm fields. It may be a flat scan or non-fillable PDF.",
     };
   }
   const pageIndex = buildPageIndex(doc);
@@ -657,6 +660,11 @@ export async function extractFields(pdfPath: string): Promise<FieldExtractionRes
     has_fields: fields.length > 0,
     field_count: fields.length,
     fields,
+    has_xfa,
+    xfa_supported: false,
+    message: has_xfa
+      ? "XFA was detected alongside AcroForm fields. AcroForm fields may not represent the full form; XFA is not mutated by this server."
+      : undefined,
   };
 }
 

@@ -1,8 +1,18 @@
 import { z } from "zod";
-import { existsSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  renameSync,
+  writeFileSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+  unlinkSync,
+} from "node:fs";
+import path from "node:path";
 import { assertAllowedPath, ensureOutputAllowed } from "../paths.js";
 import { extractFields, FieldInfo, loadPdf } from "../fields.js";
 import { PdfFillerError } from "../errors.js";
+import { pdfIdentity, PdfIdentity } from "../identity.js";
 import {
   PDFCheckBox,
   PDFRadioGroup,
@@ -16,6 +26,7 @@ export const FillPdfFieldsInput = z.object({
   output_path: z.string().min(1),
   field_values: z.record(z.unknown()),
   dry_run: z.boolean(),
+  expected_pdf_sha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
 });
 
 export type FillPdfFieldsInputT = z.infer<typeof FillPdfFieldsInput>;
@@ -27,7 +38,7 @@ export interface WriteEntry {
   to: unknown;
 }
 
-export interface FillResult {
+export interface FillResult extends PdfIdentity {
   dry_run: boolean;
   output_path?: string;
   backup_path?: string | null;
@@ -164,6 +175,18 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
   const resolvedInput = assertAllowedPath(input.pdf_path, { mustExist: true });
   const resolvedOutput = ensureOutputAllowed(input.output_path, resolvedInput);
 
+  const identity = pdfIdentity(resolvedInput);
+  if (input.expected_pdf_sha256 && input.expected_pdf_sha256.toLowerCase() !== identity.pdf_sha256) {
+    throw new PdfFillerError(
+      "PDF_IDENTITY_MISMATCH",
+      "Input PDF SHA-256 does not match expected_pdf_sha256.",
+      {
+        expected_pdf_sha256: input.expected_pdf_sha256.toLowerCase(),
+        actual_pdf_sha256: identity.pdf_sha256,
+      }
+    );
+  }
+
   const extraction = await extractFields(resolvedInput);
   const byName = new Map<string, FieldInfo>();
   for (const f of extraction.fields) byName.set(f.name, f);
@@ -237,6 +260,7 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
 
   if (input.dry_run) {
     return {
+      ...identity,
       dry_run: true,
       would_write: writeEntries,
       blocked_human_only_fields: [],
@@ -305,6 +329,13 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     }
   }
 
+  let bytes: Uint8Array;
+  try {
+    bytes = await doc.save({ updateFieldAppearances: true });
+  } catch (err) {
+    throw new PdfFillerError("WRITE_FAILED", `Failed to serialize PDF: ${(err as Error).message}`);
+  }
+
   let backup_path: string | null = null;
   if (existsSync(resolvedOutput)) {
     backup_path = `${resolvedOutput}.backup.${timestamp()}`;
@@ -319,23 +350,40 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     }
   }
 
-  let bytes: Uint8Array;
+  const tmpPath = path.join(
+    path.dirname(resolvedOutput),
+    `.${path.basename(resolvedOutput)}.tmp.${process.pid}.${timestamp()}`
+  );
   try {
-    bytes = await doc.save({ updateFieldAppearances: true });
+    writeFileSync(tmpPath, bytes);
+    const fd = openSync(tmpPath, "r+");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmpPath, resolvedOutput);
   } catch (err) {
-    throw new PdfFillerError("WRITE_FAILED", `Failed to serialize PDF: ${(err as Error).message}`);
-  }
-  try {
-    writeFileSync(resolvedOutput, bytes);
-  } catch (err) {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      /* best-effort cleanup */
+    }
     throw new PdfFillerError(
       "WRITE_FAILED",
       `Failed to write output PDF: ${(err as Error).message}`,
-      { output_path: resolvedOutput }
+      {
+        output_path: resolvedOutput,
+        backup_path,
+        recovery_hint: backup_path
+          ? "The pre-existing output file has been preserved as backup_path; rename it back to recover."
+          : "No prior output existed; nothing to recover.",
+      }
     );
   }
 
   return {
+    ...identity,
     dry_run: false,
     output_path: resolvedOutput,
     backup_path,

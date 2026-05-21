@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assertAllowedPath } from "../paths.js";
 import { extractFields, looksLikeDateField, FieldInfo, FieldType } from "../fields.js";
+import { pdfIdentity, PdfIdentity } from "../identity.js";
 
 export const ValidatePdfFillInput = z.object({
   pdf_path: z.string().min(1),
@@ -29,7 +30,7 @@ export interface ReviewEntry {
   review_reason: string;
 }
 
-export interface ValidateResult {
+export interface ValidateResult extends PdfIdentity {
   valid: boolean;
   unknown_fields: string[];
   illegal_values: IllegalValueEntry[];
@@ -175,6 +176,7 @@ function looksLikeAttestationCheckbox(field: FieldInfo): boolean {
 
 export async function validatePdfFill(input: ValidatePdfFillInputT): Promise<ValidateResult> {
   const resolved = assertAllowedPath(input.pdf_path, { mustExist: true });
+  const identity = pdfIdentity(resolved);
   const extraction = await extractFields(resolved);
   const byName = new Map<string, FieldInfo>();
   for (const f of extraction.fields) byName.set(f.name, f);
@@ -247,6 +249,7 @@ export async function validatePdfFill(input: ValidatePdfFillInputT): Promise<Val
   }
 
   return {
+    ...identity,
     valid: unknown_fields.length === 0 && illegal_values.length === 0,
     unknown_fields,
     illegal_values,

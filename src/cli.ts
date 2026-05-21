@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { listPdfFields } from "./tools/list.js";
 import { validatePdfFill } from "./tools/validate.js";
 import { fillPdfFields } from "./tools/fill.js";
+import { exportPdfFieldMap } from "./tools/export.js";
 import { toErrorPayload } from "./errors.js";
 
 function usage(): never {
@@ -12,6 +13,7 @@ function usage(): never {
   pdf-field-filler validate <pdf_path> <values.json>
   pdf-field-filler dry-run <pdf_path> <output_path> <values.json>
   pdf-field-filler fill <pdf_path> <output_path> <values.json>
+  pdf-field-filler export-map <pdf_path> <output_json_path> [--overwrite]
 `
   );
   process.exit(2);
@@ -46,6 +48,17 @@ async function main() {
         output_path: op,
         field_values,
         dry_run: cmd === "dry-run",
+      });
+      process.stdout.write(JSON.stringify(r, null, 2) + "\n");
+      return;
+    }
+    if (cmd === "export-map") {
+      const [p, op, flag] = rest;
+      if (!p || !op) usage();
+      const r = await exportPdfFieldMap({
+        pdf_path: p,
+        output_json_path: op,
+        overwrite: flag === "--overwrite",
       });
       process.stdout.write(JSON.stringify(r, null, 2) + "\n");
       return;

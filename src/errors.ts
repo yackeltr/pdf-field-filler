@@ -11,7 +11,9 @@ export type ErrorCode =
   | "OUTPUT_EQUALS_INPUT"
   | "OUTPUT_BACKUP_FAILED"
   | "WRITE_FAILED"
-  | "INVALID_INPUT";
+  | "INVALID_INPUT"
+  | "PDF_IDENTITY_MISMATCH"
+  | "OUTPUT_EXISTS";
 
 export interface ErrorPayload {
   ok: false;

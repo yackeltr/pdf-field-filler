@@ -54,33 +54,78 @@ Then **fully quit and reopen Claude Desktop** (closing the window is not enough 
 
 - `ALLOWED_DIRS` — comma-separated absolute paths the server may read from and write to. Defaults to `~/Downloads` and `~/Documents` if unset. Paths outside these directories are refused with a structured error.
 
+## Date handling
+
+Date fields fall into two categories:
+
+| Pattern                                    | Behavior                |
+|--------------------------------------------|-------------------------|
+| Ordinary data dates (DOB, death, service…) | Fillable, `needs_review: true` |
+| Signing / execution dates                  | Always blocked as human-only |
+
+So `Date_Of_Birth`, `Policy_Cert_Owner_Death_Date`, `Trust_date` are fillable but flagged for review. `Date_Signed`, `BeneficiarySignDate`, `Execution_Date` are refused outright by `fill_pdf_fields`.
+
+## PDF identity
+
+Every tool response includes:
+
+```
+"pdf_sha256":     "...64 hex chars...",
+"pdf_size_bytes": 657407,
+"pdf_mtime":      "2026-02-18T18:09:37.881Z"
+```
+
+`fill_pdf_fields` accepts an optional `expected_pdf_sha256`. If supplied and the actual input hash differs, the fill is rejected with `PDF_IDENTITY_MISMATCH`. Useful when a workflow inspects, validates, and then fills across multiple turns — pass the hash from the inspect response into the fill request to detect drift.
+
+## XFA
+
+If a PDF uses XFA forms, `list_pdf_fields` returns:
+
+```
+"has_xfa":       true,
+"xfa_supported": false,
+"message":       "XFA was detected. This server supports AcroForm inspection/filling only and will not mutate XFA."
+```
+
+If a PDF has both AcroForm fields and XFA, AcroForm fields are listed normally with a warning that they may not represent the full form. The server never modifies XFA streams.
+
 ## Tools
 
 ### `list_pdf_fields`
 
-Returns every AcroForm field with exact internal name, type, current value, legal options, widget rect, page number, and flags (`is_required`, `is_read_only`, `is_signature_field`, `is_human_only`).
+Returns every AcroForm field with exact internal name, type, current value, legal options, widget rect, page number, flags (`is_required`, `is_read_only`, `is_signature_field`, `is_human_only`), per-field extraction notes, PDF identity, and an XFA detection flag.
 
 ### `validate_pdf_fill`
 
-Validates a `{ field_name → proposed_value }` map against the real field map. Returns a review table; never modifies the PDF. Flags signature, human-only, date, and changed-value fields as `needs_review: true`.
+Validates a `{ field_name → proposed_value }` map against the real field map. Returns a review table; never modifies the PDF. Flags signature, human-only, date, attestation/certification, and changed-value fields as `needs_review: true`. Includes PDF identity.
 
 ### `fill_pdf_fields`
 
-Fills validated, non-human-only fields and saves to `output_path`.
+Fills validated, non-human-only fields and writes to `output_path`.
 - `output_path` must differ from `pdf_path`.
 - If `output_path` already exists, it is renamed to `<output_path>.backup.<YYYYMMDD-HHMMSS>` before writing.
+- The new file is written via temp-file + `fsync` + atomic `rename`. Temp files are cleaned up on any failure.
 - `dry_run: true` returns a diff table and writes no file.
+- `expected_pdf_sha256` (optional, 64 hex chars) — if provided and the actual input PDF hash differs, the fill is rejected with `PDF_IDENTITY_MISMATCH`.
 - Any unknown field, illegal value, or human-only field rejects the whole operation atomically.
 - The PDF is not flattened.
+
+### `export_pdf_field_map`
+
+Writes the full field map as JSON to a local file. Does not modify the PDF.
+- `output_json_path` must be absolute and inside `ALLOWED_DIRS`.
+- `overwrite` (default `false`) — refuses to overwrite an existing file with `OUTPUT_EXISTS` unless `true`.
+- Exported JSON includes PDF identity, `server_version`, the full field list, and any extraction notes.
 
 ## CLI (for smoke testing outside Claude Desktop)
 
 ```bash
 npm run build
-node dist/cli.js inspect /absolute/path/to/form.pdf
-node dist/cli.js validate /absolute/path/to/form.pdf /absolute/path/to/values.json
-node dist/cli.js dry-run /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json
-node dist/cli.js fill    /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json
+node dist/cli.js inspect    /absolute/path/to/form.pdf
+node dist/cli.js validate   /absolute/path/to/form.pdf /absolute/path/to/values.json
+node dist/cli.js dry-run    /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json
+node dist/cli.js fill       /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json
+node dist/cli.js export-map /absolute/path/to/form.pdf /absolute/path/to/field-map.json [--overwrite]
 ```
 
 `values.json` is a flat JSON object: `{ "FieldName": "value", ... }`.
@@ -111,4 +156,4 @@ All tool failures return a structured payload:
 { "ok": false, "error_code": "…", "message": "…", "details": {} }
 ```
 
-Codes: `PATH_NOT_ABSOLUTE`, `PATH_NOT_ALLOWED`, `PDF_NOT_FOUND`, `PDF_PARSE_ERROR`, `PDF_ENCRYPTED`, `NO_ACROFORM_FIELDS`, `UNKNOWN_FIELDS`, `ILLEGAL_VALUES`, `HUMAN_ONLY_FIELDS`, `OUTPUT_EQUALS_INPUT`, `OUTPUT_BACKUP_FAILED`, `WRITE_FAILED`, `INVALID_INPUT`.
+Codes: `PATH_NOT_ABSOLUTE`, `PATH_NOT_ALLOWED`, `PDF_NOT_FOUND`, `PDF_PARSE_ERROR`, `PDF_ENCRYPTED`, `NO_ACROFORM_FIELDS`, `UNKNOWN_FIELDS`, `ILLEGAL_VALUES`, `HUMAN_ONLY_FIELDS`, `OUTPUT_EQUALS_INPUT`, `OUTPUT_BACKUP_FAILED`, `OUTPUT_EXISTS`, `WRITE_FAILED`, `INVALID_INPUT`, `PDF_IDENTITY_MISMATCH`.
