@@ -1,0 +1,50 @@
+{
+  "manifest_version": "0.2",
+  "name": "pdf-field-filler",
+  "display_name": "PDF Field Filler",
+  "version": "0.3.1",
+  "description": "Safely inspect and fill AcroForm PDFs. List fields, validate values, and fill non-human-only fields — without flattening, signing, or touching signature/attestation fields.",
+  "author": {
+    "name": "Tom Yackel",
+    "email": "tom@yackel.net"
+  },
+  "license": "MIT",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.mjs"
+      ],
+      "env": {}
+    }
+  },
+  "tools": [
+    {
+      "name": "list_pdf_fields",
+      "description": "List every AcroForm field in a fillable PDF with exact internal names, types, current values, legal options, and widget locations. Read-only."
+    },
+    {
+      "name": "validate_pdf_fill",
+      "description": "Validate proposed field values against the actual AcroForm field map without modifying the PDF. Flags signature, human-only, date, and attestation fields for review."
+    },
+    {
+      "name": "fill_pdf_fields",
+      "description": "Fill validated, non-human-only fields into a fillable PDF. Never fills signature/initials/attestation/certification/signing-date fields. Writes atomically with auto-rollback."
+    },
+    {
+      "name": "export_pdf_field_map",
+      "description": "Write the full field map of a PDF to a local JSON file. Includes PDF identity and server version."
+    }
+  ],
+  "user_config": {
+    "allowed_dirs": {
+      "type": "string",
+      "title": "Allowed Directories",
+      "description": "Comma-separated absolute paths the server may read from and write to (e.g. /Users/you/Downloads,/Users/you/Documents). Leave blank to use the defaults: ~/Downloads and ~/Documents.",
+      "default": "",
+      "required": false
+    }
+  }
+}

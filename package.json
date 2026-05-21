@@ -1,6 +1,6 @@
 {
   "name": "pdf-field-filler",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local MCP server for safely inspecting and filling AcroForm PDFs.",
   "license": "MIT",
   "author": "Tom Yackel",
@@ -25,7 +25,8 @@
     "inspect": "node dist/cli.js inspect",
     "dry-run": "node dist/cli.js dry-run",
     "validate": "node dist/cli.js validate",
-    "export-map": "node dist/cli.js export-map"
+    "export-map": "node dist/cli.js export-map",
+    "build:mcpb": "mkdir -p dist-mcpb/server && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist-mcpb/server/index.mjs && cp manifest.json dist-mcpb/ && mcpb pack dist-mcpb/ pdf-field-filler.mcpb"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
@@ -33,7 +34,9 @@
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
     "@types/node": "22.19.19",
+    "esbuild": "^0.27.7",
     "typescript": "5.7.2",
     "vitest": "3.2.4"
   },
