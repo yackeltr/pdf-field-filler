@@ -192,11 +192,6 @@ function asString(obj: PDFObject | undefined): string | undefined {
   return undefined;
 }
 
-function asNumber(obj: PDFObject | undefined): number | undefined {
-  if (obj instanceof PDFNumber) return obj.asNumber();
-  return undefined;
-}
-
 interface InheritedAttrs {
   FT?: string;
   Ff?: number;

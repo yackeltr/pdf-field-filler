@@ -501,6 +501,13 @@ export async function buildMixedXfaPdf(): Promise<FixturePaths> {
   // AcroForm with one named text field PLUS an /XFA entry. Build entirely
   // via low-level dicts so pdf-lib's save path doesn't strip /XFA (it strips
   // XFA whenever it touches PDFAcroForm via the high-level Form API).
+  //
+  // Note on string encoding: this fixture stores /XFA as a PDFString while
+  // buildXfaPdf uses PDFHexString. The divergence is INTENTIONAL — XFA
+  // detection should not care which textual encoding the PDF uses, so the
+  // two fixtures exercise both representations of the same logical entry.
+  // Don't "normalize" the two to the same constructor without preserving
+  // both encoding paths in some other test.
   const doc = await PDFDocument.create();
   const page = doc.addPage([612, 792]);
   const ctx = doc.context;
@@ -544,6 +551,9 @@ export async function buildXfaPdf(): Promise<FixturePaths> {
     "<?xml version='1.0'?><xfa xmlns='http://www.xfa.org/schema/xfa-template/3.3'/>",
     "utf-8"
   );
+  // PDFHexString encoding — paired intentionally with PDFString in
+  // buildMixedXfaPdf to cover both textual encodings of /XFA. See comment
+  // there before changing either.
   const xfaStr = PDFHexString.fromText(xfaBytes.toString("utf-8"));
   acroForm.set(PDFName.of("XFA"), xfaStr);
   doc.catalog.set(PDFName.of("AcroForm"), acroForm);

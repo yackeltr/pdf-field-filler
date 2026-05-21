@@ -1,3 +1,13 @@
+> **Historical document.** This is the original build specification used to
+> bootstrap the project. The implementation has evolved since: the live API,
+> error codes, response shapes, and safety guarantees are documented in
+> [README.md](README.md) and [SECURITY.md](SECURITY.md). Use those for
+> current behavior; treat this file as archaeology. Notable departures from
+> the spec below: `safe_to_fill` boolean on `validate_pdf_fill`,
+> `READ_ONLY_FIELDS` error code, `expected_pdf_sha256` on `fill_pdf_fields`,
+> the `export_pdf_field_map` tool, PDF identity metadata on every response,
+> XFA detection, `MaxLen` enforcement, and a 100 MB file-size cap.
+
 # Build Spec: `pdf-field-filler` MCP Server
 
 Build a local MCP server in **TypeScript** using `@modelcontextprotocol/sdk` called **`pdf-field-filler`**.

@@ -6,7 +6,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-External audit (v0.3.1) follow-ups. No public API change.
+External audit (v0.3.1) + follow-up review. No public API change.
+
+### Added (review-round follow-ups)
+- **P0 verification pinned.** Heterogeneous-checkbox field-level `/V`
+  survives `doc.save({ updateFieldAppearances: true })` — the direct-write
+  bypass of `PDFAcroCheckBox.setValue` is not clobbered by appearance regen.
+  Asserted on top of the existing per-widget `/AS` render test.
+- **`safe_to_fill ⇒ fill accepts` invariant pin** (7 representative cases
+  across text, dropdown, dropdown-pairs, radio, heterogeneous checkbox,
+  data date, MaxLen boundary). Catches future divergence between
+  `validate.checkValueAgainstField` and `fill.validateLegalValue` at
+  runtime, until the unification in issue #1 lands.
+- **Rollback path now exercised.** `fill.ts` exposes a module-private
+  `__setRenameImplForTests` so tests can inject a `renameSync` that
+  succeeds on backup-rename, fails on publish-rename, and either
+  succeeds or fails on rollback. Pinned both branches:
+  `rollback_succeeded: true` (backup restored, original bytes intact, no
+  stray temp file) and `rollback_succeeded: false` (rollback_error
+  surfaced).
+- **`mkdtempSyncWrap`** now uses ESM `import { mkdtempSync }` instead of
+  the previous `require()` interop.
+- **Encoding intent documented** between `buildXfaPdf` (PDFHexString) and
+  `buildMixedXfaPdf` (PDFString) — divergence is deliberate, covers both
+  textual encodings of `/XFA`.
+
+### Changed (review-round follow-ups)
+- `SECURITY.md` write-ordering description corrected: serialize → temp +
+  fsync → backup-rename → publish-rename, with auto-rollback on
+  publish-rename failure. The previous text incorrectly described
+  backups as happening "before a write."
+- `pdf-field-filler-build-spec.md` now opens with a banner noting it is
+  historical context, not current API documentation; lists known
+  departures (`safe_to_fill`, `READ_ONLY_FIELDS`, `expected_pdf_sha256`,
+  `export_pdf_field_map`, identity metadata, XFA detection, `MaxLen`,
+  100 MB cap).
+
+### Removed (review-round follow-ups)
+- Dead helper `asNumber` in `src/fields.ts` (defined, never called).
 
 ### Added
 - **Cycle / depth guard** in `walkFields` — a circular AcroForm tree

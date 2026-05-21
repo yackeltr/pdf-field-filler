@@ -1,13 +1,24 @@
 import { z } from "zod";
 import {
   existsSync,
-  renameSync,
+  renameSync as fsRenameSync,
   writeFileSync,
   openSync,
   fsyncSync,
   closeSync,
   unlinkSync,
 } from "node:fs";
+
+// Module-private indirection for renameSync so tests can inject failures at
+// the precise rename phase (backup vs publish vs rollback) — vitest cannot
+// spy on ESM exports, and the rollback branch is otherwise unexercised.
+// Production code always uses fs.renameSync via this binding; the only
+// caller of __setRenameImpl is the test suite.
+type RenameFn = typeof fsRenameSync;
+let renameImpl: RenameFn = fsRenameSync;
+export function __setRenameImplForTests(fn: RenameFn | null): void {
+  renameImpl = fn ?? fsRenameSync;
+}
 import path from "node:path";
 import { assertAllowedPath, ensureOutputAllowed } from "../paths.js";
 import { extractFieldsFromDoc, FieldInfo, loadPdfFromBytes } from "../fields.js";
@@ -448,7 +459,7 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
   if (existsSync(resolvedOutput)) {
     backup_path = `${resolvedOutput}.backup.${timestamp()}`;
     try {
-      renameSync(resolvedOutput, backup_path);
+      renameImpl(resolvedOutput, backup_path);
     } catch (err) {
       try {
         if (existsSync(tmpPath)) unlinkSync(tmpPath);
@@ -465,7 +476,7 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
 
   // Step 3: atomic rename temp -> final.
   try {
-    renameSync(tmpPath, resolvedOutput);
+    renameImpl(tmpPath, resolvedOutput);
   } catch (err) {
     const original_error = (err as Error).message;
     // Clean up the temp file if it's still around.
@@ -484,7 +495,7 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     if (backup_path && !existsSync(resolvedOutput)) {
       rollback_attempted = true;
       try {
-        renameSync(backup_path, resolvedOutput);
+        renameImpl(backup_path, resolvedOutput);
         rollback_succeeded = true;
       } catch (rbErr) {
         rollback_error = (rbErr as Error).message;

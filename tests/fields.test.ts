@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, vi } from "vitest";
 import {
   buildKitchenSinkPdf,
   buildEmptyPdf,
@@ -24,7 +24,8 @@ import {
   looksLikeOrdinaryDataDate,
 } from "../src/fields.js";
 import path from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 let fx: FixturePaths;
 let empty: FixturePaths;
@@ -671,10 +672,11 @@ describe("symlink containment (#5/#6)", () => {
   });
 });
 
+// ESM-clean replacement for an earlier require()-based helper. Used by tests
+// that need a directory OUTSIDE the fixture's ALLOWED_DIRS (e.g. the symlink
+// containment test that resolves through to an external target).
 function mkdtempSyncWrap(): string {
-  const fs = require("node:fs");
-  const os = require("node:os");
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pdffieldfiller-outside-"));
+  return mkdtempSync(path.join(tmpdir(), "pdffieldfiller-outside-"));
 }
 
 describe("date subclassification (#3)", () => {
@@ -1000,6 +1002,23 @@ describe("heterogeneous checkbox per-widget appearance (rendering guarantee)", (
     return out;
   }
 
+  async function fieldV(pdfPath: string, fieldName: string): Promise<string | null> {
+    const fs = await import("node:fs");
+    const { PDFDocument, PDFName, PDFArray, PDFDict } = await import("pdf-lib");
+    const doc = await PDFDocument.load(fs.readFileSync(pdfPath));
+    const af = doc.catalog.lookup(PDFName.of("AcroForm")) as InstanceType<typeof PDFDict>;
+    const fields = af.lookup(PDFName.of("Fields")) as InstanceType<typeof PDFArray>;
+    for (let i = 0; i < fields.size(); i++) {
+      const d = fields.lookup(i) as InstanceType<typeof PDFDict>;
+      const t = d.lookup(PDFName.of("T")) as any;
+      if (t?.decodeText && t.decodeText() === fieldName) {
+        const v = d.get(PDFName.of("V")) as any;
+        return v?.decodeText ? v.decodeText() : null;
+      }
+    }
+    return null;
+  }
+
   it("filling MultiCheck = OptionB: the OptionB-bearing widget renders OptionB; the OptionA widget renders Off", async () => {
     const out = path.join(heteroCb.dir, "hetB-render.pdf");
     await fillPdfFields({
@@ -1028,6 +1047,13 @@ describe("heterogeneous checkbox per-widget appearance (rendering guarantee)", (
     expect(widgetB.ap_n_target_nonnull).toBe(true);
     expect(widgetA.ap_n_target_present).toBe(true);
     expect(widgetA.ap_n_target_nonnull).toBe(true);
+    // P0 verification: the field-level /V we wrote directly (bypassing
+    // PDFAcroCheckBox.setValue) must survive doc.save({ updateFieldAppearances: true }).
+    // pdf-lib's appearance-regen pass could plausibly normalize a checkbox /V
+    // to its own notion of the "on" state and clobber our direct write. If it
+    // did, this assertion would fail and viewers would see /V === "Yes" (or
+    // similar) instead of the per-widget export we asked for.
+    expect(await fieldV(out, "MultiCheck")).toBe("OptionB");
   });
 
   it("filling MultiCheck = OptionA: symmetric — OptionA widget renders OptionA, OptionB widget renders Off", async () => {
@@ -1153,6 +1179,171 @@ describe("toErrorPayload: ZodError → INVALID_INPUT (P1-1)", () => {
     const payload = toErrorPayload(zerr);
     expect(payload.error_code).toBe("INVALID_INPUT");
   });
+});
+
+describe("auto-rollback on publish-rename failure (P2 follow-up)", () => {
+  // The earlier backup-ordering test fires UNKNOWN_FIELDS before any write
+  // touches the filesystem, so it doesn't actually exercise the rollback
+  // code. These tests inject a renameSync that fails at the *publish* phase
+  // (call #2: temp -> output) AFTER the backup-rename has already moved the
+  // pre-existing output to backup_path. Under a working rollback, the
+  // backup is renamed back and the WRITE_FAILED payload reports
+  // rollback_attempted / rollback_succeeded. The fill.ts module exposes
+  // __setRenameImplForTests precisely so this branch can be exercised —
+  // vi.spyOn on ESM exports of node:fs is not configurable.
+  let __setRenameImplForTests: (fn: ((from: any, to: any) => void) | null) => void;
+  beforeAll(async () => {
+    ({ __setRenameImplForTests } = await import("../src/tools/fill.js"));
+  });
+
+  it("restores the pre-existing output if the publish rename fails", async () => {
+    const fs = await import("node:fs");
+    const out = path.join(fx.dir, "rollback-target.pdf");
+    fs.writeFileSync(out, "ORIGINAL");
+    const beforeBytes = fs.readFileSync(out);
+
+    let calls = 0;
+    const real = fs.renameSync.bind(fs);
+    __setRenameImplForTests((from: any, to: any) => {
+      calls++;
+      if (calls === 2) {
+        throw Object.assign(new Error("simulated publish-rename failure"), { code: "EIO" });
+      }
+      return real(from, to);
+    });
+
+    try {
+      await expect(
+        fillPdfFields({
+          pdf_path: fx.pdf,
+          output_path: out,
+          field_values: { FirstName: "Rolled" },
+          dry_run: false,
+        })
+      ).rejects.toMatchObject({
+        code: "WRITE_FAILED",
+        details: expect.objectContaining({
+          rollback_attempted: true,
+          rollback_succeeded: true,
+        }),
+      });
+    } finally {
+      __setRenameImplForTests(null);
+    }
+
+    const afterBytes = fs.readFileSync(out);
+    expect(afterBytes.equals(beforeBytes)).toBe(true);
+    const entries = fs.readdirSync(fx.dir);
+    expect(entries.some((n) => n.includes(".tmp."))).toBe(false);
+    // Three rename phases observed: backup (1), publish-fail (2), rollback (3).
+    expect(calls).toBe(3);
+  });
+
+  it("reports rollback_succeeded=false if the rollback itself fails", async () => {
+    const fs = await import("node:fs");
+    const out = path.join(fx.dir, "rollback-fail.pdf");
+    fs.writeFileSync(out, "ORIGINAL");
+
+    let calls = 0;
+    const real = fs.renameSync.bind(fs);
+    __setRenameImplForTests((from: any, to: any) => {
+      calls++;
+      if (calls === 2 || calls === 3) {
+        throw Object.assign(new Error(`simulated failure ${calls}`), { code: "EIO" });
+      }
+      return real(from, to);
+    });
+
+    try {
+      await expect(
+        fillPdfFields({
+          pdf_path: fx.pdf,
+          output_path: out,
+          field_values: { FirstName: "X" },
+          dry_run: false,
+        })
+      ).rejects.toMatchObject({
+        code: "WRITE_FAILED",
+        details: expect.objectContaining({
+          rollback_attempted: true,
+          rollback_succeeded: false,
+          rollback_error: expect.any(String),
+        }),
+      });
+    } finally {
+      __setRenameImplForTests(null);
+    }
+  });
+});
+
+describe("safe_to_fill ⇒ fill accepts (invariant pin for #1)", () => {
+  // The two functions (validate's checkValueAgainstField, fill's
+  // validateLegalValue) are hand-kept in sync. This test does not unify
+  // them — that's tracked as issue #1 — but it pins the contract: any
+  // request validate says is safe_to_fill MUST also pass a dry-run fill
+  // without illegal_values / blocked_human_only_fields / blocked_read_only.
+  // If the two diverge in a future edit, this test fires.
+
+  type Case = { name: string; pdf: () => string; values: Record<string, unknown> };
+  const buildCases = (): Case[] => [
+    {
+      name: "kitchen-sink: ordinary text",
+      pdf: () => fx.pdf,
+      values: { FirstName: "Tom" },
+    },
+    {
+      name: "kitchen-sink: dropdown by export",
+      pdf: () => fx.pdf,
+      values: { State: "NY" },
+    },
+    {
+      name: "kitchen-sink: data date (review-required but safe)",
+      pdf: () => fx.pdf,
+      values: { Date_Of_Birth: "1990-01-01" },
+    },
+    {
+      name: "heterogeneous-checkbox by per-widget export",
+      pdf: () => heteroCb.pdf,
+      values: { MultiCheck: "OptionB" },
+    },
+    {
+      name: "radio by export",
+      pdf: () => btn.pdf,
+      values: { Relationship: "Spouse" },
+    },
+    {
+      name: "dropdown pairs: accept export value",
+      pdf: () => ddPairs.pdf,
+      values: { Country: "CA" },
+    },
+    {
+      name: "text at exactly MaxLen",
+      pdf: () => maxLen.pdf,
+      values: { Short: "ABCDE" },
+    },
+  ];
+
+  for (const c of buildCases()) {
+    it(`${c.name}: safe_to_fill true ⇒ dry-run accepts`, async () => {
+      const v = await validatePdfFill({ pdf_path: c.pdf(), field_values: c.values });
+      // Sanity: each case should actually be safe; if not, the test data is
+      // wrong, which is also worth catching.
+      expect(v.valid).toBe(true);
+      expect(v.safe_to_fill).toBe(true);
+      // The invariant: dry-run fill must accept the same input.
+      const out = path.join(path.dirname(c.pdf()), `inv-${Math.random().toString(36).slice(2)}.pdf`);
+      const r = await fillPdfFields({
+        pdf_path: c.pdf(),
+        output_path: out,
+        field_values: c.values,
+        dry_run: true,
+      });
+      expect(r.unknown_fields).toEqual([]);
+      expect(r.illegal_values).toEqual([]);
+      expect(r.blocked_human_only_fields).toEqual([]);
+      expect(r.would_write?.length).toBeGreaterThan(0);
+    });
+  }
 });
 
 describe("SERVER_VERSION matches package.json (P1-6)", () => {
