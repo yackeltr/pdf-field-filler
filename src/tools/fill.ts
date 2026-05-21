@@ -10,10 +10,9 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { assertAllowedPath, ensureOutputAllowed } from "../paths.js";
-import { extractFieldsFromDoc, FieldInfo, loadPdfFromBytes, readPdfFile } from "../fields.js";
+import { extractFieldsFromDoc, FieldInfo, loadPdfFromBytes } from "../fields.js";
 import { PdfFillerError } from "../errors.js";
-import { identityFromBytes, PdfIdentity } from "../identity.js";
-import { statSync } from "node:fs";
+import { readPdfWithIdentity, PdfIdentity } from "../identity.js";
 import {
   PDFCheckBox,
   PDFRadioGroup,
@@ -189,11 +188,10 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
   const resolvedInput = assertAllowedPath(input.pdf_path, { mustExist: true });
   const resolvedOutput = ensureOutputAllowed(input.output_path, resolvedInput);
 
-  // Read the input bytes ONCE. Identity, extract, and load all derive from this
-  // same buffer so a file swap between hash and load cannot defeat the identity check.
-  const inputBytes = readPdfFile(resolvedInput);
-  const inputMtime = statSync(resolvedInput).mtime;
-  const identity = identityFromBytes(inputBytes, inputMtime);
+  // Open the input ONCE. Identity (size/mtime/hash), extract, and load all
+  // derive from the bytes read from this single fd, so neither a file-swap
+  // nor a path-rebind between calls can defeat the identity check.
+  const { bytes: inputBytes, identity } = readPdfWithIdentity(resolvedInput);
 
   if (input.expected_pdf_sha256 && input.expected_pdf_sha256.toLowerCase() !== identity.pdf_sha256) {
     throw new PdfFillerError(

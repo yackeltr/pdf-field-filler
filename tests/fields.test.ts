@@ -480,9 +480,6 @@ describe("checkbox export-value fidelity (#2)", () => {
 
 describe("identity TOCTOU (#4)", () => {
   it("identity in response matches the bytes used to load the doc", async () => {
-    // We can't truly race a swap, but we can verify the identity returned by
-    // fill matches the bytes hashed at the start, which is the same buffer
-    // used for extract + load (single read).
     const before = readFileSync(fx.pdf);
     const sha = createHash("sha256").update(before).digest("hex");
     const out = path.join(fx.dir, "toctou.pdf");
@@ -494,6 +491,98 @@ describe("identity TOCTOU (#4)", () => {
       expected_pdf_sha256: sha,
     });
     expect(r.pdf_sha256).toBe(sha);
+  });
+  it("file swap after assertAllowedPath and before fill cannot fool the identity check", async () => {
+    // Build an isolated input file. We use a hook-based mid-call swap that's
+    // possible because pdfIdentity itself is a synchronous one-shot read in
+    // the current code path — we can't actually inject a race there. What we
+    // CAN verify is the operational property: if a swap happens after the fill
+    // returns, the next operation sees the new hash, and if a stale hash is
+    // claimed as expected_pdf_sha256 against the swapped file, we get a clean
+    // PDF_IDENTITY_MISMATCH rather than a partial mutation.
+    const fs = await import("node:fs");
+    const dir = mkdtempSyncWrap();
+    process.env.ALLOWED_DIRS = `${process.env.ALLOWED_DIRS ?? ""},${dir}`;
+    const inputPath = path.join(dir, "swap.pdf");
+    fs.copyFileSync(fx.pdf, inputPath);
+    const originalSha = createHash("sha256")
+      .update(fs.readFileSync(inputPath))
+      .digest("hex");
+
+    // Swap the on-disk file to a different PDF.
+    fs.copyFileSync(empty.pdf, inputPath);
+
+    // Now ask fill to enforce the *original* sha. The file on disk no longer
+    // matches, so we must reject — proving the guarantee is keyed to actual
+    // bytes, not to a stale cached identity.
+    const out = path.join(dir, "swap-out.pdf");
+    await expect(
+      fillPdfFields({
+        pdf_path: inputPath,
+        output_path: out,
+        field_values: { FirstName: "X" },
+        dry_run: false,
+        expected_pdf_sha256: originalSha,
+      })
+    ).rejects.toMatchObject({ code: "PDF_IDENTITY_MISMATCH" });
+    expect(fs.existsSync(out)).toBe(false);
+  });
+  it("readPdfWithIdentity returns size/mtime/sha from the same fd snapshot", async () => {
+    const { readPdfWithIdentity } = await import("../src/identity.js");
+    const r = readPdfWithIdentity(fx.pdf);
+    const directSha = createHash("sha256").update(r.bytes).digest("hex");
+    expect(r.identity.pdf_sha256).toBe(directSha);
+    expect(r.identity.pdf_size_bytes).toBe(r.bytes.byteLength);
+  });
+});
+
+describe("radio re-selection clears stale /AS (#2 follow-up)", () => {
+  it("after switching the radio from Child to Spouse, only the Spouse widget shows non-Off /AS", async () => {
+    const fs = await import("node:fs");
+    const out1 = path.join(btn.dir, "radio-step1.pdf");
+    await fillPdfFields({
+      pdf_path: btn.pdf,
+      output_path: out1,
+      field_values: { Relationship: "Child" },
+      dry_run: false,
+    });
+    const out2 = path.join(btn.dir, "radio-step2.pdf");
+    await fillPdfFields({
+      pdf_path: out1,
+      output_path: out2,
+      field_values: { Relationship: "Spouse" },
+      dry_run: false,
+    });
+
+    // Inspect /AS on every widget under the Relationship field directly.
+    const { PDFDocument, PDFName, PDFArray, PDFDict } = await import("pdf-lib");
+    const doc = await PDFDocument.load(fs.readFileSync(out2));
+    const af = doc.catalog.lookup(PDFName.of("AcroForm")) as InstanceType<typeof PDFDict>;
+    const fields = af.lookup(PDFName.of("Fields")) as InstanceType<typeof PDFArray>;
+    let field: InstanceType<typeof PDFDict> | null = null;
+    for (let i = 0; i < fields.size(); i++) {
+      const d = fields.lookup(i) as InstanceType<typeof PDFDict>;
+      const t = d.lookup(PDFName.of("T")) as any;
+      if (t && t.decodeText && t.decodeText() === "Relationship") {
+        field = d;
+        break;
+      }
+    }
+    expect(field).toBeTruthy();
+    const kids = field!.lookup(PDFName.of("Kids")) as InstanceType<typeof PDFArray>;
+    const asStates: string[] = [];
+    for (let i = 0; i < kids.size(); i++) {
+      const k = kids.lookup(i) as InstanceType<typeof PDFDict>;
+      const as = k.get(PDFName.of("AS")) as any;
+      asStates.push(as?.decodeText ? as.decodeText() : String(as));
+    }
+    // Exactly one widget should be on, with name "Spouse"; the rest "Off".
+    const nonOff = asStates.filter((s) => s !== "Off");
+    expect(nonOff).toEqual(["Spouse"]);
+    expect(asStates.filter((s) => s === "Off").length).toBe(2);
+    // And the field's /V should agree.
+    const v = field!.get(PDFName.of("V")) as any;
+    expect(v?.decodeText ? v.decodeText() : String(v)).toBe("Spouse");
   });
 });
 

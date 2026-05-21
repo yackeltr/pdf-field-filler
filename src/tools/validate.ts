@@ -171,6 +171,11 @@ function isEmptyValue(v: unknown): boolean {
 }
 
 function isEmptyCurrent(v: unknown): boolean {
+  // `false` is treated as empty on purpose: it represents an unchecked checkbox
+  // with no /V set, which is semantically "no value present" rather than a real
+  // current value. Filling such a checkbox is not a state change worth flagging
+  // as "differs from non-empty current value" — without this, every first-time
+  // checkbox fill would trip a spurious review reason.
   return isEmptyValue(v) || v === false;
 }
 
