@@ -122,8 +122,7 @@ const SIGNING_TOKEN_PAIRS: Array<[string, string]> = [
 
 export function looksLikeDateField(name: string): boolean {
   const tokens = tokenize(name);
-  if (tokens.includes("date") || tokens.includes("dob")) return true;
-  return /date/i.test(name) && /\bdate\b/i.test(name.replace(/[_\W]+/g, " "));
+  return tokens.includes("date") || tokens.includes("dob") || tokens.includes("dod");
 }
 
 function isSigningDateName(name: string): boolean {
@@ -146,7 +145,7 @@ export function isHumanOnlyName(name: string, type: FieldType): boolean {
   return false;
 }
 
-function readPdfFile(pdfPath: string): Buffer {
+export function readPdfFile(pdfPath: string): Buffer {
   try {
     return readFileSync(pdfPath);
   } catch (err) {
@@ -157,27 +156,30 @@ function readPdfFile(pdfPath: string): Buffer {
   }
 }
 
-export async function loadPdf(pdfPath: string): Promise<PDFDocument> {
-  const bytes = readPdfFile(pdfPath);
+export async function loadPdfFromBytes(
+  bytes: Uint8Array,
+  ctx: { path?: string } = {}
+): Promise<PDFDocument> {
   let doc: PDFDocument;
   try {
-    doc = await PDFDocument.load(bytes, { ignoreEncryption: false });
+    doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (/encrypt/i.test(msg)) {
-      throw new PdfFillerError("PDF_ENCRYPTED", "PDF is encrypted or password-protected.", {
-        path: pdfPath,
-        cause: msg,
-      });
-    }
     throw new PdfFillerError("PDF_PARSE_ERROR", `Failed to parse PDF: ${msg}`, {
-      path: pdfPath,
+      path: ctx.path,
     });
   }
   if (doc.isEncrypted) {
-    throw new PdfFillerError("PDF_ENCRYPTED", "PDF is encrypted.", { path: pdfPath });
+    throw new PdfFillerError("PDF_ENCRYPTED", "PDF is encrypted or password-protected.", {
+      path: ctx.path,
+    });
   }
   return doc;
+}
+
+export async function loadPdf(pdfPath: string): Promise<PDFDocument> {
+  const bytes = readPdfFile(pdfPath);
+  return loadPdfFromBytes(bytes, { path: pdfPath });
 }
 
 function getCatalogDict(doc: PDFDocument): PDFDict {
@@ -626,8 +628,7 @@ function detectXfa(af: PDFDict | null): boolean {
 const XFA_NOTICE =
   "XFA was detected. This server supports AcroForm inspection/filling only and will not mutate XFA.";
 
-export async function extractFields(pdfPath: string): Promise<FieldExtractionResult> {
-  const doc = await loadPdf(pdfPath);
+export async function extractFieldsFromDoc(doc: PDFDocument): Promise<FieldExtractionResult> {
   const af = getAcroFormDict(doc);
   const has_xfa = detectXfa(af);
   if (!af) {
@@ -666,6 +667,11 @@ export async function extractFields(pdfPath: string): Promise<FieldExtractionRes
       ? "XFA was detected alongside AcroForm fields. AcroForm fields may not represent the full form; XFA is not mutated by this server."
       : undefined,
   };
+}
+
+export async function extractFields(pdfPath: string): Promise<FieldExtractionResult> {
+  const doc = await loadPdf(pdfPath);
+  return extractFieldsFromDoc(doc);
 }
 
 export type { PDFDocument };

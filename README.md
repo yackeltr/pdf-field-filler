@@ -123,10 +123,12 @@ Writes the full field map as JSON to a local file. Does not modify the PDF.
 npm run build
 node dist/cli.js inspect    /absolute/path/to/form.pdf
 node dist/cli.js validate   /absolute/path/to/form.pdf /absolute/path/to/values.json
-node dist/cli.js dry-run    /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json
-node dist/cli.js fill       /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json
+node dist/cli.js dry-run    /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json [--expected-sha256 <hex>]
+node dist/cli.js fill       /absolute/path/to/form.pdf /absolute/path/to/out.pdf /absolute/path/to/values.json [--expected-sha256 <hex>]
 node dist/cli.js export-map /absolute/path/to/form.pdf /absolute/path/to/field-map.json [--overwrite]
 ```
+
+`--expected-sha256` is the CLI equivalent of the MCP tool's `expected_pdf_sha256` argument; a mismatch fails the operation with `PDF_IDENTITY_MISMATCH` before any read of the doc body.
 
 `values.json` is a flat JSON object: `{ "FieldName": "value", ... }`.
 

@@ -10,15 +10,17 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { assertAllowedPath, ensureOutputAllowed } from "../paths.js";
-import { extractFields, FieldInfo, loadPdf } from "../fields.js";
+import { extractFieldsFromDoc, FieldInfo, loadPdfFromBytes, readPdfFile } from "../fields.js";
 import { PdfFillerError } from "../errors.js";
-import { pdfIdentity, PdfIdentity } from "../identity.js";
+import { identityFromBytes, PdfIdentity } from "../identity.js";
+import { statSync } from "node:fs";
 import {
   PDFCheckBox,
   PDFRadioGroup,
   PDFTextField,
   PDFDropdown,
   PDFOptionList,
+  PDFName,
 } from "pdf-lib";
 
 export const FillPdfFieldsInput = z.object({
@@ -66,6 +68,18 @@ function timestamp(): string {
 
 function isSkipValue(v: unknown): boolean {
   return v === null || v === undefined;
+}
+
+function setCheckboxToExport(f: PDFCheckBox, exportName: string): void {
+  // Write /V to the exact export name from /AP/N so a non-standard checkbox
+  // (e.g. "Yes", "1", or any custom name) is preserved across the round-trip.
+  // pdf-lib's PDFCheckBox.check() looks up an "on" value internally and may
+  // pick the wrong appearance state if multiple non-Off keys exist.
+  const target = PDFName.of(exportName);
+  f.acroField.setValue(target);
+  for (const widget of f.acroField.getWidgets()) {
+    widget.dict.set(PDFName.of("AS"), target);
+  }
 }
 
 function validateLegalValue(field: FieldInfo, proposed: unknown):
@@ -175,7 +189,12 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
   const resolvedInput = assertAllowedPath(input.pdf_path, { mustExist: true });
   const resolvedOutput = ensureOutputAllowed(input.output_path, resolvedInput);
 
-  const identity = pdfIdentity(resolvedInput);
+  // Read the input bytes ONCE. Identity, extract, and load all derive from this
+  // same buffer so a file swap between hash and load cannot defeat the identity check.
+  const inputBytes = readPdfFile(resolvedInput);
+  const inputMtime = statSync(resolvedInput).mtime;
+  const identity = identityFromBytes(inputBytes, inputMtime);
+
   if (input.expected_pdf_sha256 && input.expected_pdf_sha256.toLowerCase() !== identity.pdf_sha256) {
     throw new PdfFillerError(
       "PDF_IDENTITY_MISMATCH",
@@ -187,7 +206,8 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     );
   }
 
-  const extraction = await extractFields(resolvedInput);
+  const doc = await loadPdfFromBytes(inputBytes, { path: resolvedInput });
+  const extraction = await extractFieldsFromDoc(doc);
   const byName = new Map<string, FieldInfo>();
   for (const f of extraction.fields) byName.set(f.name, f);
 
@@ -270,7 +290,6 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     };
   }
 
-  const doc = await loadPdf(resolvedInput);
   const form = doc.getForm();
 
   for (const p of planned) {
@@ -280,9 +299,8 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
         case "text": {
           const f = form.getField(fieldName) as PDFTextField;
           if (!(f instanceof PDFTextField)) throw new Error("expected text field");
-          const v = p.normalized as string;
-          if (v.length === 0) f.setText(undefined);
-          else f.setText(v);
+          // Always write the literal string; "" writes an empty value rather than clearing /V.
+          f.setText(p.normalized as string);
           break;
         }
         case "checkbox": {
@@ -290,18 +308,26 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
           if (!(f instanceof PDFCheckBox)) throw new Error("expected checkbox");
           const v = p.normalized;
           if (typeof v === "boolean") {
-            if (v) f.check();
-            else f.uncheck();
+            if (!v) {
+              f.uncheck();
+            } else if (p.field.options.length > 0) {
+              // Honor the exact /AP/N export name detected at extract time.
+              setCheckboxToExport(f, p.field.options[0]);
+            } else {
+              f.check();
+            }
           } else if (typeof v === "string") {
             if (v === "Off") f.uncheck();
-            else f.check();
+            else setCheckboxToExport(f, v);
           }
           break;
         }
         case "radio": {
           const f = form.getField(fieldName) as PDFRadioGroup;
           if (!(f instanceof PDFRadioGroup)) throw new Error("expected radio group");
-          f.select(p.normalized as string);
+          // Select via the exact export name from /AP/N rather than relying on
+          // pdf-lib's option-list lookup, which may normalize option strings.
+          f.acroField.setValue(PDFName.of(p.normalized as string));
           break;
         }
         case "dropdown": {
@@ -336,20 +362,9 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     throw new PdfFillerError("WRITE_FAILED", `Failed to serialize PDF: ${(err as Error).message}`);
   }
 
-  let backup_path: string | null = null;
-  if (existsSync(resolvedOutput)) {
-    backup_path = `${resolvedOutput}.backup.${timestamp()}`;
-    try {
-      renameSync(resolvedOutput, backup_path);
-    } catch (err) {
-      throw new PdfFillerError(
-        "OUTPUT_BACKUP_FAILED",
-        `Failed to back up existing output file.`,
-        { output_path: resolvedOutput, cause: (err as Error).message }
-      );
-    }
-  }
-
+  // Step 1: write + fsync temp first, so a durable copy exists on disk
+  // before we touch the pre-existing output. A crash between backup-rename
+  // and final-rename otherwise leaves no file at output_path.
   const tmpPath = path.join(
     path.dirname(resolvedOutput),
     `.${path.basename(resolvedOutput)}.tmp.${process.pid}.${timestamp()}`
@@ -362,7 +377,6 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     } finally {
       closeSync(fd);
     }
-    renameSync(tmpPath, resolvedOutput);
   } catch (err) {
     try {
       if (existsSync(tmpPath)) unlinkSync(tmpPath);
@@ -371,7 +385,43 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
     }
     throw new PdfFillerError(
       "WRITE_FAILED",
-      `Failed to write output PDF: ${(err as Error).message}`,
+      `Failed to write temp output PDF: ${(err as Error).message}`,
+      { output_path: resolvedOutput }
+    );
+  }
+
+  // Step 2: back up an existing output (rename moves it out of the way).
+  let backup_path: string | null = null;
+  if (existsSync(resolvedOutput)) {
+    backup_path = `${resolvedOutput}.backup.${timestamp()}`;
+    try {
+      renameSync(resolvedOutput, backup_path);
+    } catch (err) {
+      try {
+        if (existsSync(tmpPath)) unlinkSync(tmpPath);
+      } catch {
+        /* best-effort */
+      }
+      throw new PdfFillerError(
+        "OUTPUT_BACKUP_FAILED",
+        `Failed to back up existing output file.`,
+        { output_path: resolvedOutput, cause: (err as Error).message }
+      );
+    }
+  }
+
+  // Step 3: atomic rename temp -> final.
+  try {
+    renameSync(tmpPath, resolvedOutput);
+  } catch (err) {
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      /* best-effort */
+    }
+    throw new PdfFillerError(
+      "WRITE_FAILED",
+      `Failed to publish output PDF: ${(err as Error).message}`,
       {
         output_path: resolvedOutput,
         backup_path,

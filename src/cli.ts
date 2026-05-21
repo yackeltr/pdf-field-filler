@@ -11,12 +11,20 @@ function usage(): never {
     `Usage:
   pdf-field-filler inspect <pdf_path>
   pdf-field-filler validate <pdf_path> <values.json>
-  pdf-field-filler dry-run <pdf_path> <output_path> <values.json>
-  pdf-field-filler fill <pdf_path> <output_path> <values.json>
+  pdf-field-filler dry-run <pdf_path> <output_path> <values.json> [--expected-sha256 <hex>]
+  pdf-field-filler fill <pdf_path> <output_path> <values.json> [--expected-sha256 <hex>]
   pdf-field-filler export-map <pdf_path> <output_json_path> [--overwrite]
 `
   );
   process.exit(2);
+}
+
+function takeFlag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  if (i === -1) return undefined;
+  const v = args[i + 1];
+  args.splice(i, 2);
+  return v;
 }
 
 async function main() {
@@ -40,7 +48,9 @@ async function main() {
       return;
     }
     if (cmd === "dry-run" || cmd === "fill") {
-      const [p, op, vp] = rest;
+      const argsCopy = [...rest];
+      const expected = takeFlag(argsCopy, "--expected-sha256");
+      const [p, op, vp] = argsCopy;
       if (!p || !op || !vp) usage();
       const field_values = JSON.parse(readFileSync(vp, "utf8")) as Record<string, unknown>;
       const r = await fillPdfFields({
@@ -48,6 +58,7 @@ async function main() {
         output_path: op,
         field_values,
         dry_run: cmd === "dry-run",
+        expected_pdf_sha256: expected,
       });
       process.stdout.write(JSON.stringify(r, null, 2) + "\n");
       return;

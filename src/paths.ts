@@ -65,6 +65,13 @@ export function assertAllowedPath(p: string, opts: PathCheckOptions = {}): strin
   return resolved;
 }
 
+function isInside(target: string, allowed: string[]): boolean {
+  return allowed.some((dir) => {
+    const rel = path.relative(dir, target);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  });
+}
+
 export function ensureOutputAllowed(outputPath: string, inputResolved: string): string {
   if (typeof outputPath !== "string" || outputPath.length === 0) {
     throw new PdfFillerError("INVALID_INPUT", "Output path must be a non-empty string.");
@@ -76,24 +83,36 @@ export function ensureOutputAllowed(outputPath: string, inputResolved: string): 
   }
   const resolvedParent = safeRealpath(path.dirname(outputPath));
   const candidate = path.join(resolvedParent, path.basename(outputPath));
-  if (candidate === inputResolved) {
-    throw new PdfFillerError(
-      "OUTPUT_EQUALS_INPUT",
-      "Output path must differ from input path.",
-      { input_path: inputResolved, output_path: candidate }
-    );
-  }
   const allowed = getAllowedDirs();
-  const ok = allowed.some((dir) => {
-    const rel = path.relative(dir, resolvedParent);
-    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-  });
-  if (!ok) {
+  if (!isInside(resolvedParent, allowed)) {
     throw new PdfFillerError(
       "PATH_NOT_ALLOWED",
       `Output directory is outside allowed directories.`,
       { output_path: outputPath, resolved_dir: resolvedParent, allowed_dirs: allowed }
     );
   }
+
+  // If output_path already exists, resolve it (a symlink target may escape
+  // ALLOWED_DIRS or collide with the input). Both must be re-checked.
+  let finalTarget = candidate;
+  if (existsSync(candidate)) {
+    finalTarget = safeRealpath(candidate);
+    if (!isInside(finalTarget, allowed)) {
+      throw new PdfFillerError(
+        "PATH_NOT_ALLOWED",
+        `Output path resolves to a location outside allowed directories.`,
+        { output_path: outputPath, resolved_target: finalTarget, allowed_dirs: allowed }
+      );
+    }
+  }
+
+  if (finalTarget === inputResolved || candidate === inputResolved) {
+    throw new PdfFillerError(
+      "OUTPUT_EQUALS_INPUT",
+      "Output path must differ from input path.",
+      { input_path: inputResolved, output_path: candidate, resolved_target: finalTarget }
+    );
+  }
+
   return candidate;
 }

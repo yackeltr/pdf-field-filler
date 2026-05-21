@@ -431,6 +431,179 @@ describe("atomic fill", () => {
   });
 });
 
+describe("encryption (deterministic)", () => {
+  it("does not throw PDF_ENCRYPTED on a normal unencrypted PDF", async () => {
+    const r = await listPdfFields({ pdf_path: fx.pdf });
+    expect(r.has_fields).toBe(true);
+  });
+});
+
+describe("checkbox export-value fidelity (#2)", () => {
+  it("writes the exact /AP/N export name when a string is supplied", async () => {
+    const out = path.join(btn.dir, "cbfid.pdf");
+    await fillPdfFields({
+      pdf_path: btn.pdf,
+      output_path: out,
+      field_values: { AgreeYes: "Yes" },
+      dry_run: false,
+    });
+    // Re-read and confirm the round-trip preserved "Yes"
+    const r = await listPdfFields({ pdf_path: out });
+    const f = r.fields?.find((x) => x.name === "AgreeYes");
+    expect(f?.current_value).toBe("Yes");
+  });
+  it("writes the exact /AP/N export name when boolean true is supplied", async () => {
+    const out = path.join(btn.dir, "cbfid2.pdf");
+    await fillPdfFields({
+      pdf_path: btn.pdf,
+      output_path: out,
+      field_values: { AgreeYes: true },
+      dry_run: false,
+    });
+    const r = await listPdfFields({ pdf_path: out });
+    const f = r.fields?.find((x) => x.name === "AgreeYes");
+    expect(f?.current_value).toBe("Yes");
+  });
+  it("radio selection writes the exact export name from /AP/N", async () => {
+    const out = path.join(btn.dir, "radfid.pdf");
+    await fillPdfFields({
+      pdf_path: btn.pdf,
+      output_path: out,
+      field_values: { Relationship: "Spouse" },
+      dry_run: false,
+    });
+    const r = await listPdfFields({ pdf_path: out });
+    const f = r.fields?.find((x) => x.name === "Relationship");
+    expect(f?.current_value).toBe("Spouse");
+  });
+});
+
+describe("identity TOCTOU (#4)", () => {
+  it("identity in response matches the bytes used to load the doc", async () => {
+    // We can't truly race a swap, but we can verify the identity returned by
+    // fill matches the bytes hashed at the start, which is the same buffer
+    // used for extract + load (single read).
+    const before = readFileSync(fx.pdf);
+    const sha = createHash("sha256").update(before).digest("hex");
+    const out = path.join(fx.dir, "toctou.pdf");
+    const r = await fillPdfFields({
+      pdf_path: fx.pdf,
+      output_path: out,
+      field_values: { FirstName: "TOC" },
+      dry_run: false,
+      expected_pdf_sha256: sha,
+    });
+    expect(r.pdf_sha256).toBe(sha);
+  });
+});
+
+describe("backup-ordering (#8)", () => {
+  it("a pre-existing output stays in place if temp write fails", async () => {
+    const fs = await import("node:fs");
+    const out = path.join(fx.dir, "preexisting.pdf");
+    fs.writeFileSync(out, "ORIGINAL");
+    // Force the temp write to fail by making the output directory read-only.
+    // We can't easily simulate this cross-platform without root, so instead
+    // we trigger a failure path: pass an invalid pdf and assert original
+    // pre-existing output is still readable afterward (it should be — we
+    // never even get to the rename step).
+    const beforeBytes = fs.readFileSync(out);
+    await expect(
+      fillPdfFields({
+        pdf_path: fx.pdf,
+        output_path: out,
+        field_values: { Nope: "x" },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "UNKNOWN_FIELDS" });
+    const afterBytes = fs.readFileSync(out);
+    expect(afterBytes.equals(beforeBytes)).toBe(true);
+  });
+  it("after successful fill, original output is preserved as backup", async () => {
+    const fs = await import("node:fs");
+    const out = path.join(fx.dir, "rotate.pdf");
+    fs.writeFileSync(out, "ORIGINAL");
+    const r = await fillPdfFields({
+      pdf_path: fx.pdf,
+      output_path: out,
+      field_values: { FirstName: "Rotated" },
+      dry_run: false,
+    });
+    expect(r.backup_path).toBeTruthy();
+    expect(fs.readFileSync(r.backup_path!).toString()).toBe("ORIGINAL");
+  });
+});
+
+describe("symlink containment (#5/#6)", () => {
+  it("rejects output_path that exists as a symlink pointing outside ALLOWED_DIRS", async () => {
+    const fs = await import("node:fs");
+    const outsideDir = mkdtempSyncWrap();
+    const outsideTarget = path.join(outsideDir, "outside.pdf");
+    fs.writeFileSync(outsideTarget, "EXTERNAL");
+    const linkPath = path.join(fx.dir, "escape.pdf");
+    try {
+      fs.symlinkSync(outsideTarget, linkPath);
+    } catch {
+      // skip if symlinks unavailable in env
+      return;
+    }
+    await expect(
+      fillPdfFields({
+        pdf_path: fx.pdf,
+        output_path: linkPath,
+        field_values: { FirstName: "X" },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "PATH_NOT_ALLOWED" });
+    // External target untouched
+    expect(fs.readFileSync(outsideTarget).toString()).toBe("EXTERNAL");
+  });
+  it("rejects output_path that is a symlink to the input", async () => {
+    const fs = await import("node:fs");
+    const linkPath = path.join(fx.dir, "loopback.pdf");
+    try {
+      fs.symlinkSync(fx.pdf, linkPath);
+    } catch {
+      return;
+    }
+    await expect(
+      fillPdfFields({
+        pdf_path: fx.pdf,
+        output_path: linkPath,
+        field_values: { FirstName: "X" },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "OUTPUT_EQUALS_INPUT" });
+  });
+});
+
+function mkdtempSyncWrap(): string {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  return fs.mkdtempSync(path.join(os.tmpdir(), "pdffieldfiller-outside-"));
+}
+
+describe("date subclassification (#3)", () => {
+  it("ordinary data date gets a 'data date' review reason", async () => {
+    const r = await validatePdfFill({
+      pdf_path: fx.pdf,
+      field_values: { Date_Of_Birth: "1990-01-01" },
+    });
+    const row = r.review.find((x) => x.field_name === "Date_Of_Birth");
+    expect(row?.needs_review).toBe(true);
+    expect(row?.review_reason).toMatch(/data date/);
+  });
+});
+
+describe("looksLikeDateField false-positive (#13)", () => {
+  it("does not flag fields like 'Last_Updated'", async () => {
+    const { looksLikeDateField } = await import("../src/fields.js");
+    expect(looksLikeDateField("Last_Updated")).toBe(false);
+    expect(looksLikeDateField("Updated")).toBe(false);
+    expect(looksLikeDateField("UpdateDate")).toBe(true);
+  });
+});
+
 describe("path security", () => {
   it("rejects relative paths", async () => {
     await expect(

@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { assertAllowedPath } from "../paths.js";
-import { extractFields, looksLikeDateField, FieldInfo, FieldType } from "../fields.js";
+import {
+  extractFields,
+  looksLikeDateField,
+  looksLikeOrdinaryDataDate,
+  FieldInfo,
+  FieldType,
+} from "../fields.js";
 import { pdfIdentity, PdfIdentity } from "../identity.js";
 
 export const ValidatePdfFillInput = z.object({
@@ -219,7 +225,11 @@ export async function validatePdfFill(input: ValidatePdfFillInputT): Promise<Val
       needs_review = true;
     }
     if (looksLikeDateField(field.name)) {
-      reasons.push("date field — confirm format");
+      if (looksLikeOrdinaryDataDate(field.name)) {
+        reasons.push("data date — confirm format and value");
+      } else {
+        reasons.push("signing/execution date — should not be filled by the model");
+      }
       needs_review = true;
     }
     if (isEmptyValue(proposed)) {
