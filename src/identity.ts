@@ -37,6 +37,5 @@ export function readPdfWithIdentity(pdfPath: string): ReadPdfResult {
   }
 }
 
-export function pdfIdentity(pdfPath: string): PdfIdentity {
-  return readPdfWithIdentity(pdfPath).identity;
-}
+// Path-based pdfIdentity is intentionally removed; callers should use
+// readPdfWithIdentity so identity and bytes share a single fd snapshot.

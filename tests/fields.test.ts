@@ -927,6 +927,138 @@ describe("heterogeneous checkbox widgets per-widget AS (#1 follow-up)", () => {
   });
 });
 
+describe("heterogeneous checkbox per-widget appearance (rendering guarantee)", () => {
+  // The data-vs-rendering split: /V on the field tells callers what is
+  // logically selected, but a spec-honoring viewer renders, for each widget,
+  // /AP/N/<that widget's own /AS>. So the guarantee we need to pin is per
+  // widget: the selected widget's /AS must be a key present in *that same
+  // widget's* /AP/N. The previous tests asserted "some widget has AS=X and
+  // some /AP/N somewhere contains X" via array sorts, which would still pass
+  // if the bookkeeping was crossed. This pairs them directly.
+  async function widgetPairs(pdfPath: string, fieldName: string): Promise<
+    Array<{ as: string; apN_keys: string[]; ap_n_target_present: boolean; ap_n_target_nonnull: boolean }>
+  > {
+    const fs = await import("node:fs");
+    const { PDFDocument, PDFName, PDFArray, PDFDict } = await import("pdf-lib");
+    const doc = await PDFDocument.load(fs.readFileSync(pdfPath));
+    const af = doc.catalog.lookup(PDFName.of("AcroForm")) as InstanceType<typeof PDFDict>;
+    const fields = af.lookup(PDFName.of("Fields")) as InstanceType<typeof PDFArray>;
+    let field: InstanceType<typeof PDFDict> | null = null;
+    for (let i = 0; i < fields.size(); i++) {
+      const d = fields.lookup(i) as InstanceType<typeof PDFDict>;
+      const t = d.lookup(PDFName.of("T")) as any;
+      if (t?.decodeText && t.decodeText() === fieldName) {
+        field = d;
+        break;
+      }
+    }
+    if (!field) throw new Error(`field ${fieldName} not found`);
+    const kids = field.lookup(PDFName.of("Kids")) as InstanceType<typeof PDFArray>;
+    const out: Array<{
+      as: string;
+      apN_keys: string[];
+      ap_n_target_present: boolean;
+      ap_n_target_nonnull: boolean;
+    }> = [];
+    for (let i = 0; i < kids.size(); i++) {
+      const k = kids.lookup(i) as InstanceType<typeof PDFDict>;
+      const asObj = k.get(PDFName.of("AS")) as any;
+      const asName = asObj?.decodeText ? asObj.decodeText() : String(asObj);
+      const ap = k.lookup(PDFName.of("AP")) as InstanceType<typeof PDFDict> | null;
+      const n =
+        ap instanceof PDFDict
+          ? (ap.lookup(PDFName.of("N")) as InstanceType<typeof PDFDict> | null)
+          : null;
+      const keys: string[] = [];
+      let target_present = false;
+      let target_nonnull = false;
+      if (n instanceof PDFDict) {
+        for (const key of n.keys()) {
+          keys.push(key.decodeText());
+        }
+        target_present = keys.includes(asName);
+        if (target_present) {
+          const entry = n.lookup(PDFName.of(asName));
+          target_nonnull = entry !== undefined && entry !== null;
+        }
+      }
+      out.push({
+        as: asName,
+        apN_keys: keys,
+        ap_n_target_present: target_present,
+        ap_n_target_nonnull: target_nonnull,
+      });
+    }
+    return out;
+  }
+
+  it("filling MultiCheck = OptionB: the OptionB-bearing widget renders OptionB; the OptionA widget renders Off", async () => {
+    const out = path.join(heteroCb.dir, "hetB-render.pdf");
+    await fillPdfFields({
+      pdf_path: heteroCb.pdf,
+      output_path: out,
+      field_values: { MultiCheck: "OptionB" },
+      dry_run: false,
+    });
+    const pairs = await widgetPairs(out, "MultiCheck");
+    expect(pairs.length).toBe(2);
+
+    // Identify each widget by its OWN /AP/N on-key, never by its /AS.
+    // The OptionB widget is *defined* as the widget whose /AP/N contains the
+    // "OptionB" appearance stream — that identification holds regardless of
+    // what /AS is, so the subsequent /AS assertion is real, not tautological.
+    // A bug that set the wrong widget's /AS would leave widget-B identified
+    // here but widget-B.as still "Off" — the assertion would fail.
+    const widgetB = pairs.find((p) => p.apN_keys.includes("OptionB"))!;
+    const widgetA = pairs.find((p) => p.apN_keys.includes("OptionA"))!;
+    // Load-bearing: did applyBtnExport set the right widget's /AS?
+    expect(widgetB.as).toBe("OptionB");
+    expect(widgetA.as).toBe("Off");
+    // Rendering contract: each widget's /AS must resolve to a real entry in
+    // *its own* /AP/N. Without this, viewers see a dangling appearance.
+    expect(widgetB.ap_n_target_present).toBe(true);
+    expect(widgetB.ap_n_target_nonnull).toBe(true);
+    expect(widgetA.ap_n_target_present).toBe(true);
+    expect(widgetA.ap_n_target_nonnull).toBe(true);
+  });
+
+  it("filling MultiCheck = OptionA: symmetric — OptionA widget renders OptionA, OptionB widget renders Off", async () => {
+    const out = path.join(heteroCb.dir, "hetA-render.pdf");
+    await fillPdfFields({
+      pdf_path: heteroCb.pdf,
+      output_path: out,
+      field_values: { MultiCheck: "OptionA" },
+      dry_run: false,
+    });
+    const pairs = await widgetPairs(out, "MultiCheck");
+    const widgetA = pairs.find((p) => p.apN_keys.includes("OptionA"))!;
+    const widgetB = pairs.find((p) => p.apN_keys.includes("OptionB"))!;
+    expect(widgetA.as).toBe("OptionA");
+    expect(widgetB.as).toBe("Off");
+    expect(widgetA.ap_n_target_present).toBe(true);
+    expect(widgetA.ap_n_target_nonnull).toBe(true);
+    expect(widgetB.ap_n_target_present).toBe(true);
+    expect(widgetB.ap_n_target_nonnull).toBe(true);
+  });
+
+  it("uncheck: both widgets render Off, and Off is in each widget's own /AP/N", async () => {
+    const out = path.join(heteroCb.dir, "hetOff-render.pdf");
+    await fillPdfFields({
+      pdf_path: heteroCb.pdf,
+      output_path: out,
+      field_values: { MultiCheck: false },
+      dry_run: false,
+    });
+    const pairs = await widgetPairs(out, "MultiCheck");
+    for (const p of pairs) {
+      expect(p.as).toBe("Off");
+      expect(p.apN_keys).toContain("Off");
+      expect(p.ap_n_target_present).toBe(true);
+      expect(p.ap_n_target_nonnull).toBe(true);
+    }
+  });
+});
+
 describe("mixed XFA + AcroForm (#6)", () => {
   it("lists AcroForm fields and flags has_xfa with a warning", async () => {
     const r = await listPdfFields({ pdf_path: mixedXfa.pdf });

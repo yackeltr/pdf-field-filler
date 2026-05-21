@@ -2,8 +2,8 @@ import { z } from "zod";
 import { existsSync, writeFileSync, openSync, fsyncSync, closeSync, unlinkSync, renameSync } from "node:fs";
 import path from "node:path";
 import { assertAllowedPath, ensureOutputAllowed } from "../paths.js";
-import { extractFields } from "../fields.js";
-import { pdfIdentity } from "../identity.js";
+import { extractFieldsFromDoc, loadPdfFromBytes } from "../fields.js";
+import { readPdfWithIdentity } from "../identity.js";
 import { PdfFillerError } from "../errors.js";
 
 export const SERVER_VERSION = "0.3.0";
@@ -53,8 +53,9 @@ export async function exportPdfFieldMap(input: ExportPdfFieldMapInputT): Promise
     );
   }
 
-  const identity = pdfIdentity(resolvedInput);
-  const extraction = await extractFields(resolvedInput);
+  const { bytes, identity } = readPdfWithIdentity(resolvedInput);
+  const doc = await loadPdfFromBytes(bytes, { path: resolvedInput });
+  const extraction = await extractFieldsFromDoc(doc);
 
   const payload = {
     ...identity,

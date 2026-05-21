@@ -145,17 +145,11 @@ export function isHumanOnlyName(name: string, type: FieldType): boolean {
   return false;
 }
 
-export function readPdfFile(pdfPath: string): Buffer {
-  try {
-    return readFileSync(pdfPath);
-  } catch (err) {
-    throw new PdfFillerError("PDF_NOT_FOUND", `Could not read PDF: ${pdfPath}`, {
-      path: pdfPath,
-      cause: (err as Error).message,
-    });
-  }
-}
-
+// Path-based readers are intentionally NOT exported. The tools must obtain
+// bytes via readPdfWithIdentity (single-fd snapshot) and pass them to
+// loadPdfFromBytes, so identity, parse, and extract all share one buffer.
+// Eliminating the path-based loader from the export surface makes the
+// TOCTOU leak structurally unrepresentable in callers.
 export async function loadPdfFromBytes(
   bytes: Uint8Array,
   ctx: { path?: string } = {}
@@ -175,11 +169,6 @@ export async function loadPdfFromBytes(
     });
   }
   return doc;
-}
-
-export async function loadPdf(pdfPath: string): Promise<PDFDocument> {
-  const bytes = readPdfFile(pdfPath);
-  return loadPdfFromBytes(bytes, { path: pdfPath });
 }
 
 function getCatalogDict(doc: PDFDocument): PDFDict {
@@ -669,9 +658,7 @@ export async function extractFieldsFromDoc(doc: PDFDocument): Promise<FieldExtra
   };
 }
 
-export async function extractFields(pdfPath: string): Promise<FieldExtractionResult> {
-  const doc = await loadPdf(pdfPath);
-  return extractFieldsFromDoc(doc);
-}
+// Path-based extractFields is intentionally removed. Callers should use
+// readPdfWithIdentity + loadPdfFromBytes + extractFieldsFromDoc.
 
 export type { PDFDocument };

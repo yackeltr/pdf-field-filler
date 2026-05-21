@@ -1,13 +1,14 @@
 import { z } from "zod";
 import { assertAllowedPath } from "../paths.js";
 import {
-  extractFields,
+  extractFieldsFromDoc,
+  loadPdfFromBytes,
   looksLikeDateField,
   looksLikeOrdinaryDataDate,
   FieldInfo,
   FieldType,
 } from "../fields.js";
-import { pdfIdentity, PdfIdentity } from "../identity.js";
+import { readPdfWithIdentity, PdfIdentity } from "../identity.js";
 
 export const ValidatePdfFillInput = z.object({
   pdf_path: z.string().min(1),
@@ -189,8 +190,9 @@ function looksLikeAttestationCheckbox(field: FieldInfo): boolean {
 
 export async function validatePdfFill(input: ValidatePdfFillInputT): Promise<ValidateResult> {
   const resolved = assertAllowedPath(input.pdf_path, { mustExist: true });
-  const identity = pdfIdentity(resolved);
-  const extraction = await extractFields(resolved);
+  const { bytes, identity } = readPdfWithIdentity(resolved);
+  const doc = await loadPdfFromBytes(bytes, { path: resolved });
+  const extraction = await extractFieldsFromDoc(doc);
   const byName = new Map<string, FieldInfo>();
   for (const f of extraction.fields) byName.set(f.name, f);
 
