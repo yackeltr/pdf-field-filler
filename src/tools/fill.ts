@@ -83,17 +83,36 @@ function widgetOnName(widgetDict: PDFDict): string | null {
 }
 
 function applyBtnExport(
+  fieldDict: PDFDict,
   widgets: Array<{ dict: PDFDict }>,
-  acroSetValue: (v: PDFName) => void,
   selectedExport: string
 ): void {
-  // 1) Logical /V on the field is the selected export name.
-  acroSetValue(PDFName.of(selectedExport));
-  // 2) Per-widget /AS: only the widget whose own /AP/N exposes the selected
-  //    export gets /AS = selected. Every other widget in the group is
-  //    explicitly reset to /Off so no stale appearance lingers from a prior
-  //    selection. This is what makes the visible button match /V across all
-  //    viewers, including those that don't rebuild appearances from /V alone.
+  // 1) Logical /V on the field is the selected export name. We write directly
+  //    to the field dict rather than going through pdf-lib's
+  //    PDFAcroCheckBox.setValue, which validates the name against its own
+  //    notion of the "on" state — that validation rejects per-widget exports
+  //    in heterogeneous-checkbox-group fields. Direct write is faithful to
+  //    the AcroForm spec, which allows any non-Off /AP/N name as the /V.
+  fieldDict.set(PDFName.of("V"), PDFName.of(selectedExport));
+  // 2) Per-widget /AS:
+  //    - The widget whose own /AP/N exposes `selectedExport` as a non-Off
+  //      state gets /AS = selectedExport.
+  //    - Every other widget in the group is explicitly reset to /Off.
+  //
+  //    This handles two distinct cases under a single rule:
+  //      (a) Homogeneous widgets (the common case): all widgets share the
+  //          same non-Off /AP/N key. Only one widget matches the selection
+  //          per call; the rest go Off.
+  //      (b) Heterogeneous widgets (rare, e.g. some government forms model
+  //          a mutually-exclusive checkbox group as one field with different
+  //          per-widget export names): the matching widget shows its own
+  //          appearance, the others go Off. Setting every widget's AS to
+  //          the same target name would produce broken appearances on
+  //          widgets whose /AP/N doesn't contain that key.
+  //
+  //    The per-widget /AP/N inspection (via widgetOnName) is what makes
+  //    case (b) correct rather than relying on validate having narrowed
+  //    the value space.
   const offName = PDFName.of("Off");
   const targetName = PDFName.of(selectedExport);
   for (const w of widgets) {
@@ -106,8 +125,9 @@ function applyBtnExport(
   }
 }
 
-function uncheckBtn(widgets: Array<{ dict: PDFDict }>, acroSetValue: (v: PDFName) => void): void {
-  acroSetValue(PDFName.of("Off"));
+function uncheckBtn(fieldDict: PDFDict, widgets: Array<{ dict: PDFDict }>): void {
+  // Write /V = /Off directly for the same reason as applyBtnExport.
+  fieldDict.set(PDFName.of("V"), PDFName.of("Off"));
   const offName = PDFName.of("Off");
   for (const w of widgets) {
     w.dict.set(PDFName.of("AS"), offName);
@@ -347,21 +367,20 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
           if (!(f instanceof PDFCheckBox)) throw new Error("expected checkbox");
           const v = p.normalized;
           const widgets = f.acroField.getWidgets();
-          const set = (n: PDFName) => f.acroField.setValue(n);
+          const fdict = f.acroField.dict;
           if (typeof v === "boolean") {
-            if (!v) uncheckBtn(widgets, set);
-            else applyBtnExport(widgets, set, p.field.options[0] ?? "Yes");
+            if (!v) uncheckBtn(fdict, widgets);
+            else applyBtnExport(fdict, widgets, p.field.options[0] ?? "Yes");
           } else if (typeof v === "string") {
-            if (v === "Off") uncheckBtn(widgets, set);
-            else applyBtnExport(widgets, set, v);
+            if (v === "Off") uncheckBtn(fdict, widgets);
+            else applyBtnExport(fdict, widgets, v);
           }
           break;
         }
         case "radio": {
           const f = form.getField(fieldName) as PDFRadioGroup;
           if (!(f instanceof PDFRadioGroup)) throw new Error("expected radio group");
-          const widgets = f.acroField.getWidgets();
-          applyBtnExport(widgets, (n) => f.acroField.setValue(n), p.normalized as string);
+          applyBtnExport(f.acroField.dict, f.acroField.getWidgets(), p.normalized as string);
           break;
         }
         case "dropdown": {

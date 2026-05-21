@@ -267,6 +267,72 @@ export async function buildCheckboxRadioPdf(): Promise<FixturePaths> {
   return { dir, pdf };
 }
 
+export async function buildHeterogeneousCheckboxPdf(): Promise<FixturePaths> {
+  // One AcroForm field named "MultiCheck" with two widget kids, each carrying
+  // a DIFFERENT /AP/N export name ("OptionA" and "OptionB"). This is the case
+  // the per-widget AS code is supposed to handle: setting the field to
+  // "OptionA" should leave widget-A's AS="OptionA" and widget-B's AS="Off",
+  // and vice versa. A naive implementation that sets every widget's AS to
+  // the same target would leave widget-B with AS="OptionA" which doesn't
+  // exist in its own /AP/N — a broken appearance.
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const ctx = doc.context;
+
+  const parent = ctx.obj({}) as PDFDict;
+  parent.set(PDFName.of("T"), PDFString.of("MultiCheck"));
+  parent.set(PDFName.of("FT"), PDFName.of("Btn"));
+  // Not a radio (no FF_RADIO bit) — extracted as checkbox.
+  parent.set(PDFName.of("Ff"), PDFNumber.of(0));
+  const parentRef = ctx.register(parent);
+
+  function makeKid(name: string, x: number): any {
+    const w = ctx.obj({}) as PDFDict;
+    w.set(PDFName.of("Subtype"), PDFName.of("Widget"));
+    w.set(PDFName.of("Parent"), parentRef);
+    w.set(
+      PDFName.of("Rect"),
+      ctx.obj([
+        PDFNumber.of(x),
+        PDFNumber.of(700),
+        PDFNumber.of(x + 14),
+        PDFNumber.of(714),
+      ]) as PDFArray
+    );
+    w.set(PDFName.of("AS"), PDFName.of("Off"));
+    const ap = ctx.obj({}) as PDFDict;
+    const n = ctx.obj({}) as PDFDict;
+    n.set(PDFName.of(name), ctx.obj({}) as PDFDict);
+    n.set(PDFName.of("Off"), ctx.obj({}) as PDFDict);
+    ap.set(PDFName.of("N"), n);
+    w.set(PDFName.of("AP"), ap);
+    return ctx.register(w);
+  }
+  const refA = makeKid("OptionA", 50);
+  const refB = makeKid("OptionB", 80);
+  const kids = ctx.obj([]) as PDFArray;
+  kids.push(refA);
+  kids.push(refB);
+  parent.set(PDFName.of("Kids"), kids);
+
+  const af = ctx.obj({}) as PDFDict;
+  const fields = ctx.obj([]) as PDFArray;
+  fields.push(parentRef);
+  af.set(PDFName.of("Fields"), fields);
+  doc.catalog.set(PDFName.of("AcroForm"), af);
+
+  const annots = ctx.obj([]) as PDFArray;
+  annots.push(refA);
+  annots.push(refB);
+  page.node.set(PDFName.of("Annots"), annots);
+
+  const bytes = await doc.save();
+  const dir = mkdtempSync(path.join(tmpdir(), "pdffieldfiller-"));
+  const pdf = path.join(dir, "hetero-cb.pdf");
+  writeFileSync(pdf, bytes);
+  return { dir, pdf };
+}
+
 export async function buildDropdownPairsPdf(): Promise<FixturePaths> {
   const doc = await PDFDocument.create();
   const page = doc.addPage([612, 792]);

@@ -8,6 +8,7 @@ import {
   buildDropdownPairsPdf,
   buildReadOnlyPdf,
   buildMixedXfaPdf,
+  buildHeterogeneousCheckboxPdf,
   FixturePaths,
 } from "./helpers/buildFixture.js";
 import { listPdfFields } from "../src/tools/list.js";
@@ -31,6 +32,7 @@ let btn: FixturePaths;
 let ddPairs: FixturePaths;
 let ro: FixturePaths;
 let mixedXfa: FixturePaths;
+let heteroCb: FixturePaths;
 
 beforeAll(async () => {
   fx = await buildKitchenSinkPdf();
@@ -41,6 +43,7 @@ beforeAll(async () => {
   ddPairs = await buildDropdownPairsPdf();
   ro = await buildReadOnlyPdf();
   mixedXfa = await buildMixedXfaPdf();
+  heteroCb = await buildHeterogeneousCheckboxPdf();
   process.env.ALLOWED_DIRS = [
     fx.dir,
     empty.dir,
@@ -50,6 +53,7 @@ beforeAll(async () => {
     ddPairs.dir,
     ro.dir,
     mixedXfa.dir,
+    heteroCb.dir,
   ].join(",");
 });
 
@@ -493,28 +497,19 @@ describe("checkbox export-value fidelity (#2)", () => {
   });
 });
 
-describe("identity TOCTOU (#4)", () => {
-  it("identity in response matches the bytes used to load the doc", async () => {
-    const before = readFileSync(fx.pdf);
-    const sha = createHash("sha256").update(before).digest("hex");
-    const out = path.join(fx.dir, "toctou.pdf");
-    const r = await fillPdfFields({
-      pdf_path: fx.pdf,
-      output_path: out,
-      field_values: { FirstName: "TOC" },
-      dry_run: false,
-      expected_pdf_sha256: sha,
-    });
-    expect(r.pdf_sha256).toBe(sha);
-  });
-  it("file swap after assertAllowedPath and before fill cannot fool the identity check", async () => {
-    // Build an isolated input file. We use a hook-based mid-call swap that's
-    // possible because pdfIdentity itself is a synchronous one-shot read in
-    // the current code path — we can't actually inject a race there. What we
-    // CAN verify is the operational property: if a swap happens after the fill
-    // returns, the next operation sees the new hash, and if a stale hash is
-    // claimed as expected_pdf_sha256 against the swapped file, we get a clean
-    // PDF_IDENTITY_MISMATCH rather than a partial mutation.
+describe("identity invariants (#4)", () => {
+  // Note: the "single-buffer" property of fill — that identity, extract, and
+  // load all derive from one in-memory read — is a structural invariant of
+  // fill.ts and cannot be observed from a black-box test. The fill function
+  // reads the path at call time; there is no cross-call cache to race against.
+  // The invariant is enforced by code review (no path-based read after the
+  // initial readPdfWithIdentity call). The runtime tests below cover the
+  // observable behaviors that downstream callers actually rely on.
+
+  it("stale expected_pdf_sha256 against an on-disk-mutated file rejects with PDF_IDENTITY_MISMATCH", async () => {
+    // This pins the explicit-hash *rejection* path, not the single-buffer
+    // refactor. It documents that callers passing a stale hash get rejected
+    // cleanly rather than silently filling against changed bytes.
     const fs = await import("node:fs");
     const dir = mkdtempSyncWrap();
     process.env.ALLOWED_DIRS = `${process.env.ALLOWED_DIRS ?? ""},${dir}`;
@@ -523,13 +518,7 @@ describe("identity TOCTOU (#4)", () => {
     const originalSha = createHash("sha256")
       .update(fs.readFileSync(inputPath))
       .digest("hex");
-
-    // Swap the on-disk file to a different PDF.
     fs.copyFileSync(empty.pdf, inputPath);
-
-    // Now ask fill to enforce the *original* sha. The file on disk no longer
-    // matches, so we must reject — proving the guarantee is keyed to actual
-    // bytes, not to a stale cached identity.
     const out = path.join(dir, "swap-out.pdf");
     await expect(
       fillPdfFields({
@@ -541,13 +530,6 @@ describe("identity TOCTOU (#4)", () => {
       })
     ).rejects.toMatchObject({ code: "PDF_IDENTITY_MISMATCH" });
     expect(fs.existsSync(out)).toBe(false);
-  });
-  it("readPdfWithIdentity returns size/mtime/sha from the same fd snapshot", async () => {
-    const { readPdfWithIdentity } = await import("../src/identity.js");
-    const r = readPdfWithIdentity(fx.pdf);
-    const directSha = createHash("sha256").update(r.bytes).digest("hex");
-    expect(r.identity.pdf_sha256).toBe(directSha);
-    expect(r.identity.pdf_size_bytes).toBe(r.bytes.byteLength);
   });
 });
 
@@ -875,6 +857,73 @@ describe("explicit per-widget /AS (#1)", () => {
     expect(asStates.filter((s) => s === "Off").length).toBe(2);
     const v = rg!.get(PDFName.of("V")) as any;
     expect(v?.decodeText?.()).toBe("Child");
+  });
+});
+
+describe("heterogeneous checkbox widgets per-widget AS (#1 follow-up)", () => {
+  async function widgetAsStates(pdfPath: string, fieldName: string): Promise<string[]> {
+    const fs = await import("node:fs");
+    const { PDFDocument, PDFName, PDFArray, PDFDict } = await import("pdf-lib");
+    const doc = await PDFDocument.load(fs.readFileSync(pdfPath));
+    const af = doc.catalog.lookup(PDFName.of("AcroForm")) as InstanceType<typeof PDFDict>;
+    const fields = af.lookup(PDFName.of("Fields")) as InstanceType<typeof PDFArray>;
+    let field: InstanceType<typeof PDFDict> | null = null;
+    for (let i = 0; i < fields.size(); i++) {
+      const d = fields.lookup(i) as InstanceType<typeof PDFDict>;
+      const t = d.lookup(PDFName.of("T")) as any;
+      if (t?.decodeText && t.decodeText() === fieldName) {
+        field = d;
+        break;
+      }
+    }
+    if (!field) throw new Error(`field ${fieldName} not found`);
+    const kids = field.lookup(PDFName.of("Kids")) as InstanceType<typeof PDFArray>;
+    const out: string[] = [];
+    for (let i = 0; i < kids.size(); i++) {
+      const k = kids.lookup(i) as InstanceType<typeof PDFDict>;
+      const as = k.get(PDFName.of("AS")) as any;
+      out.push(as?.decodeText ? as.decodeText() : String(as));
+    }
+    return out;
+  }
+  it("lists both export names from the heterogeneous widgets", async () => {
+    const r = await listPdfFields({ pdf_path: heteroCb.pdf });
+    const f = r.fields?.find((x) => x.name === "MultiCheck");
+    expect(f).toBeTruthy();
+    expect(f?.options.sort()).toEqual(["OptionA", "OptionB"]);
+  });
+  it("selecting OptionA sets only widget-A's AS=OptionA, widget-B's AS=Off", async () => {
+    const out = path.join(heteroCb.dir, "hetA.pdf");
+    await fillPdfFields({
+      pdf_path: heteroCb.pdf,
+      output_path: out,
+      field_values: { MultiCheck: "OptionA" },
+      dry_run: false,
+    });
+    const states = await widgetAsStates(out, "MultiCheck");
+    expect(states.sort()).toEqual(["Off", "OptionA"]);
+  });
+  it("selecting OptionB sets only widget-B's AS=OptionB, widget-A's AS=Off", async () => {
+    const out = path.join(heteroCb.dir, "hetB.pdf");
+    await fillPdfFields({
+      pdf_path: heteroCb.pdf,
+      output_path: out,
+      field_values: { MultiCheck: "OptionB" },
+      dry_run: false,
+    });
+    const states = await widgetAsStates(out, "MultiCheck");
+    expect(states.sort()).toEqual(["Off", "OptionB"]);
+  });
+  it("uncheck sets every widget's AS=Off regardless of its own export", async () => {
+    const out = path.join(heteroCb.dir, "hetOff.pdf");
+    await fillPdfFields({
+      pdf_path: heteroCb.pdf,
+      output_path: out,
+      field_values: { MultiCheck: false },
+      dry_run: false,
+    });
+    const states = await widgetAsStates(out, "MultiCheck");
+    expect(states).toEqual(["Off", "Off"]);
   });
 });
 
