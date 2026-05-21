@@ -26,7 +26,7 @@
     "dry-run": "node dist/cli.js dry-run",
     "validate": "node dist/cli.js validate",
     "export-map": "node dist/cli.js export-map",
-    "build:mcpb": "mkdir -p dist-mcpb/server && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist-mcpb/server/index.mjs && cp manifest.json dist-mcpb/ && mcpb pack dist-mcpb/ pdf-field-filler.mcpb"
+    "build:mcpb": "node scripts/build-mcpb.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

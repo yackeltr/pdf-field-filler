@@ -449,6 +449,40 @@ export async function buildMaxLenPdf(): Promise<FixturePaths> {
   return { dir, pdf };
 }
 
+export async function buildUnknownTypePdf(): Promise<FixturePaths> {
+  // A field with /T but no /FT — determineType returns "unknown". Used to
+  // prove validate and fill agree (both reject) for unknown-type fields.
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const ctx = doc.context;
+
+  const w = ctx.obj({}) as PDFDict;
+  w.set(PDFName.of("T"), PDFString.of("Mysterious"));
+  // intentionally NO /FT
+  w.set(PDFName.of("Subtype"), PDFName.of("Widget"));
+  w.set(
+    PDFName.of("Rect"),
+    ctx.obj([PDFNumber.of(50), PDFNumber.of(700), PDFNumber.of(250), PDFNumber.of(720)]) as PDFArray
+  );
+  const ref = ctx.register(w);
+
+  const af = ctx.obj({}) as PDFDict;
+  const fields = ctx.obj([]) as PDFArray;
+  fields.push(ref);
+  af.set(PDFName.of("Fields"), fields);
+  doc.catalog.set(PDFName.of("AcroForm"), af);
+
+  const annots = ctx.obj([]) as PDFArray;
+  annots.push(ref);
+  page.node.set(PDFName.of("Annots"), annots);
+
+  const bytes = await doc.save();
+  const dir = mkdtempSync(path.join(tmpdir(), "pdffieldfiller-"));
+  const pdf = path.join(dir, "unknown.pdf");
+  writeFileSync(pdf, bytes);
+  return { dir, pdf };
+}
+
 export async function buildReadOnlyPdf(): Promise<FixturePaths> {
   const doc = await PDFDocument.create();
   const page = doc.addPage([612, 792]);

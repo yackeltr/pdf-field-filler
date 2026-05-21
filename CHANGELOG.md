@@ -6,7 +6,54 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
-External audit (v0.3.1) + follow-up review. No public API change.
+External audit (v0.3.1) + follow-up reviews. The third review found a
+distribution-breaking bug and three behavioral divergences from the
+documented safety model; all fixed.
+
+### Fixed (third-review findings — distribution-critical)
+- **`.mcpb` bundle no longer crashes at install-time startup.** The previous
+  build read `package.json` via `import.meta.url + ../../` at module load,
+  which works in the dev tree but resolves outside the extracted bundle to
+  a path that doesn't exist. Verified by extracting to `/tmp` and confirming
+  the bundle threw `ENOENT: no such file or directory, open '/tmp/package.json'`.
+  Fix: `scripts/build-mcpb.mjs` now injects the version into the bundled
+  artifact via `esbuild --define:__BUILD_TIME_VERSION__='"<version>"'`, and
+  rewrites `manifest.json` in the dist folder to match `package.json` at
+  build time. Dev tree retains the runtime read with a try/catch fallback.
+- **`safe_to_fill ⇒ fill accepts` violated for unknown-type fields.** A
+  field with `/T` but no resolvable `/FT` extracted as `type: "unknown"`,
+  and `validate.checkValueAgainstField`'s default branch returned
+  `{ normalized: proposed }` (no `illegal`), so `safe_to_fill: true`.
+  Meanwhile `fill.validateLegalValue`'s default branch correctly rejected
+  with `ILLEGAL_VALUES`. The invariant pin didn't catch this because no
+  fixture built an FT-less field. Fix: validate's default branch now
+  returns the same `illegal` shape fill does. New fixture
+  `buildUnknownTypePdf` + tests for both sides.
+- **`fill_pdf_fields` did not honor the "never mutates XFA" guarantee.**
+  SECURITY.md and README claim the server never writes XFA streams, but
+  fill's prior path went straight to `doc.getForm()` and `doc.save()` on a
+  mixed AcroForm+XFA PDF — and pdf-lib's save path can drop or rewrite
+  `/XFA` when AcroForm fields are touched. New `XFA_PRESENT` error code;
+  fill now refuses any PDF with `has_xfa: true`. Read-side tools (list,
+  validate, export) remain available because they never serialize.
+
+### Fixed (third-review findings — lower-severity)
+- **Degenerate checkbox.** `fill` with `boolean true` on a checkbox whose
+  `/AP/N` couldn't be read previously wrote `/V = "Yes"` while every widget
+  ended up with `/AS = Off` — a logically-checked, visually-unchecked
+  field. Both validate and fill now reject this case with a clear reason.
+- **`toErrorPayload` no longer mislabels non-domain throws as
+  `PDF_PARSE_ERROR`.** A `TypeError` anywhere previously surfaced to the
+  caller as a parse problem, pointing them at the file instead of the
+  code. New `INTERNAL_ERROR` code for unexpected catch-all throws;
+  `ZodError` continues to map to `INVALID_INPUT`, domain errors continue
+  to map to their specific codes.
+- **`__setRenameImplForTests` now refuses production calls.** Throws unless
+  `process.env.VITEST` is set or `NODE_ENV === "test"`. The hook is still
+  exported (vitest discovers it via ESM import), but the mutable-rebind
+  seam is no longer reachable from a production runtime.
+- **`manifest.json` version drift closed.** `scripts/build-mcpb.mjs` now
+  rewrites the manifest's `version` from `package.json` at build time.
 
 ### Added (review-round follow-ups)
 - **P0 verification pinned.** Heterogeneous-checkbox field-level `/V`

@@ -11,6 +11,7 @@ import {
   buildHeterogeneousCheckboxPdf,
   buildCircularKidsPdf,
   buildMaxLenPdf,
+  buildUnknownTypePdf,
   FixturePaths,
 } from "./helpers/buildFixture.js";
 import { listPdfFields } from "../src/tools/list.js";
@@ -38,6 +39,7 @@ let mixedXfa: FixturePaths;
 let heteroCb: FixturePaths;
 let cyclic: FixturePaths;
 let maxLen: FixturePaths;
+let unknownType: FixturePaths;
 
 beforeAll(async () => {
   fx = await buildKitchenSinkPdf();
@@ -51,6 +53,7 @@ beforeAll(async () => {
   heteroCb = await buildHeterogeneousCheckboxPdf();
   cyclic = await buildCircularKidsPdf();
   maxLen = await buildMaxLenPdf();
+  unknownType = await buildUnknownTypePdf();
   process.env.ALLOWED_DIRS = [
     fx.dir,
     empty.dir,
@@ -63,6 +66,7 @@ beforeAll(async () => {
     heteroCb.dir,
     cyclic.dir,
     maxLen.dir,
+    unknownType.dir,
   ].join(",");
 });
 
@@ -1272,6 +1276,157 @@ describe("auto-rollback on publish-rename failure (P2 follow-up)", () => {
       });
     } finally {
       __setRenameImplForTests(null);
+    }
+  });
+});
+
+describe("unknown-type field: validate and fill must agree (review finding #2)", () => {
+  it("validate flags it as illegal (valid=false, safe_to_fill=false)", async () => {
+    const r = await validatePdfFill({
+      pdf_path: unknownType.pdf,
+      field_values: { Mysterious: "x" },
+    });
+    expect(r.valid).toBe(false);
+    expect(r.safe_to_fill).toBe(false);
+    expect(r.illegal_values.length).toBe(1);
+    expect(r.illegal_values[0]?.reason).toMatch(/not fillable/);
+  });
+  it("fill rejects with ILLEGAL_VALUES and writes no output", async () => {
+    const out = path.join(unknownType.dir, "unk-out.pdf");
+    await expect(
+      fillPdfFields({
+        pdf_path: unknownType.pdf,
+        output_path: out,
+        field_values: { Mysterious: "x" },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "ILLEGAL_VALUES" });
+    const fs = await import("node:fs");
+    expect(fs.existsSync(out)).toBe(false);
+  });
+});
+
+describe("fill on a PDF with /XFA refuses (review finding #3)", () => {
+  it("fill_pdf_fields rejects mixed AcroForm+XFA with XFA_PRESENT", async () => {
+    const out = path.join(mixedXfa.dir, "xfa-fill-out.pdf");
+    await expect(
+      fillPdfFields({
+        pdf_path: mixedXfa.pdf,
+        output_path: out,
+        field_values: { Name: "ShouldNotWrite" },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "XFA_PRESENT" });
+    const fs = await import("node:fs");
+    expect(fs.existsSync(out)).toBe(false);
+    // The input must be byte-identical post-failure — fill never opened it
+    // for writing, never serialized, never touched /XFA. Re-parse and
+    // confirm the AcroForm dict still has /XFA as a key (substring matching
+    // on the raw bytes is fragile across pdf-lib's encodings).
+    const { PDFDocument, PDFName, PDFDict } = await import("pdf-lib");
+    const doc = await PDFDocument.load(fs.readFileSync(mixedXfa.pdf));
+    const af = doc.catalog.lookup(PDFName.of("AcroForm"));
+    expect(af).toBeInstanceOf(PDFDict);
+    const xfaKey = [...(af as InstanceType<typeof PDFDict>).keys()].map((k) =>
+      k.decodeText()
+    );
+    expect(xfaKey).toContain("XFA");
+  });
+  it("list_pdf_fields and validate_pdf_fill remain allowed on XFA PDFs (read-only)", async () => {
+    const lr = await listPdfFields({ pdf_path: mixedXfa.pdf });
+    expect(lr.has_xfa).toBe(true);
+    expect(lr.has_fields).toBe(true);
+    const vr = await validatePdfFill({
+      pdf_path: mixedXfa.pdf,
+      field_values: { Name: "Tom" },
+    });
+    expect(vr.pdf_sha256).toBeTruthy();
+  });
+});
+
+describe("degenerate checkbox without readable /AP/N states (review finding 4a)", () => {
+  // Synthetic checkbox-typed field with no /AP appearance dict at all,
+  // so options is empty. We build this inline rather than as a fixture
+  // helper since it's the only test that needs it.
+  it("validate marks `true` as illegal when options is empty", async () => {
+    const { PDFDocument, PDFName, PDFString, PDFArray, PDFDict, PDFNumber } =
+      await import("pdf-lib");
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([612, 792]);
+    const ctx = doc.context;
+    const cb = ctx.obj({}) as InstanceType<typeof PDFDict>;
+    cb.set(PDFName.of("T"), PDFString.of("Naked"));
+    cb.set(PDFName.of("FT"), PDFName.of("Btn"));
+    cb.set(PDFName.of("Subtype"), PDFName.of("Widget"));
+    cb.set(
+      PDFName.of("Rect"),
+      ctx.obj([
+        PDFNumber.of(50),
+        PDFNumber.of(700),
+        PDFNumber.of(70),
+        PDFNumber.of(720),
+      ]) as InstanceType<typeof PDFArray>
+    );
+    // intentionally no /AP
+    const ref = ctx.register(cb);
+    const af = ctx.obj({}) as InstanceType<typeof PDFDict>;
+    const fields = ctx.obj([]) as InstanceType<typeof PDFArray>;
+    fields.push(ref);
+    af.set(PDFName.of("Fields"), fields);
+    doc.catalog.set(PDFName.of("AcroForm"), af);
+    const annots = ctx.obj([]) as InstanceType<typeof PDFArray>;
+    annots.push(ref);
+    page.node.set(PDFName.of("Annots"), annots);
+    const bytes = await doc.save();
+    const fs = await import("node:fs");
+    const dir = await import("node:os").then((m) =>
+      fs.mkdtempSync(path.join(m.tmpdir(), "pdffieldfiller-naked-"))
+    );
+    process.env.ALLOWED_DIRS = `${process.env.ALLOWED_DIRS},${dir}`;
+    const pdf = path.join(dir, "naked.pdf");
+    fs.writeFileSync(pdf, bytes);
+
+    const r = await validatePdfFill({
+      pdf_path: pdf,
+      field_values: { Naked: true },
+    });
+    expect(r.valid).toBe(false);
+    expect(r.safe_to_fill).toBe(false);
+    expect(r.illegal_values[0]?.reason).toMatch(/readable.*\/AP\/N|export states/);
+
+    const out = path.join(dir, "naked-out.pdf");
+    await expect(
+      fillPdfFields({
+        pdf_path: pdf,
+        output_path: out,
+        field_values: { Naked: true },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "ILLEGAL_VALUES" });
+  });
+});
+
+describe("toErrorPayload non-domain throw is INTERNAL_ERROR (review finding 4b)", () => {
+  it("classifies a plain TypeError as INTERNAL_ERROR rather than PDF_PARSE_ERROR", async () => {
+    const { toErrorPayload } = await import("../src/errors.js");
+    const payload = toErrorPayload(new TypeError("internal bug"));
+    expect(payload.error_code).toBe("INTERNAL_ERROR");
+  });
+});
+
+describe("__setRenameImplForTests is gated to test env (review finding 4d)", () => {
+  it("throws if called outside a test/VITEST env", async () => {
+    const { __setRenameImplForTests } = await import("../src/tools/fill.js");
+    const prevVitest = process.env.VITEST;
+    const prevNode = process.env.NODE_ENV;
+    delete process.env.VITEST;
+    process.env.NODE_ENV = "production";
+    try {
+      expect(() => __setRenameImplForTests(null)).toThrow(/test-only/);
+    } finally {
+      if (prevVitest !== undefined) process.env.VITEST = prevVitest;
+      if (prevNode !== undefined) process.env.NODE_ENV = prevNode;
+      else delete process.env.NODE_ENV;
     }
   });
 });

@@ -17,6 +17,13 @@ import {
 type RenameFn = typeof fsRenameSync;
 let renameImpl: RenameFn = fsRenameSync;
 export function __setRenameImplForTests(fn: RenameFn | null): void {
+  // Refuse calls from production. vitest sets process.env.VITEST,
+  // NODE_ENV=test is the conventional alternative. Either is sufficient.
+  if (!process.env.VITEST && process.env.NODE_ENV !== "test") {
+    throw new Error(
+      "__setRenameImplForTests is a test-only seam; refusing to mutate the fill path in production."
+    );
+  }
   renameImpl = fn ?? fsRenameSync;
 }
 import path from "node:path";
@@ -155,7 +162,22 @@ function validateLegalValue(field: FieldInfo, proposed: unknown):
       return { ok: true, normalized: s };
     }
     case "checkbox": {
-      if (typeof proposed === "boolean") return { ok: true, normalized: proposed };
+      if (typeof proposed === "boolean") {
+        // If we couldn't read any /AP/N states off the widgets, we have no
+        // export name to write — applyBtnExport would set /V to a guessed
+        // "Yes" while every widget gets /AS = Off, producing a logically
+        // checked but visually unchecked field. Refuse rather than write a
+        // broken state.
+        if (proposed === true && field.options.length === 0) {
+          return {
+            ok: false,
+            reason:
+              "Checkbox has no readable /AP/N export states; cannot honor `true`. Supply the exact export name instead, or leave the field empty.",
+            legal_options: [],
+          };
+        }
+        return { ok: true, normalized: proposed };
+      }
       if (typeof proposed === "string") {
         if (field.options.length === 0 || field.options.includes(proposed)) {
           return { ok: true, normalized: proposed };
@@ -270,6 +292,18 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
 
   const doc = await loadPdfFromBytes(inputBytes, { path: resolvedInput });
   const extraction = await extractFieldsFromDoc(doc);
+  // Refuse to write any AcroForm changes if the PDF carries an /XFA stream.
+  // pdf-lib's form/save path can drop or rewrite /XFA when AcroForm fields
+  // are touched, which would violate the "never mutates XFA" guarantee in
+  // SECURITY.md. list_pdf_fields and validate_pdf_fill are read-only and
+  // remain allowed on XFA-bearing PDFs; only fill is gated.
+  if (extraction.has_xfa) {
+    throw new PdfFillerError(
+      "XFA_PRESENT",
+      "Refusing to fill: the input PDF contains an /XFA stream. Filling AcroForm fields here can cause pdf-lib to drop or rewrite XFA on save, which is outside this server's safety guarantee.",
+      { path: resolvedInput }
+    );
+  }
   const byName = new Map<string, FieldInfo>();
   for (const f of extraction.fields) byName.set(f.name, f);
 

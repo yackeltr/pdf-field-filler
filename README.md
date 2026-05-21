@@ -159,7 +159,7 @@ Vitest runs against synthetic in-memory fixture PDFs — no external files are r
 
 These are deliberate scope boundaries, not bugs. They are unlikely to change.
 
-- **XFA forms are detected, not edited.** If a PDF uses XFA, responses carry `has_xfa: true` and `xfa_supported: false`. The server will not mutate XFA streams. Mixed AcroForm+XFA PDFs are listed normally with a warning that AcroForm fields may not represent the full form.
+- **XFA forms are detected, not edited.** If a PDF uses XFA, responses carry `has_xfa: true` and `xfa_supported: false`. `list_pdf_fields` and `validate_pdf_fill` work normally (read-only). `fill_pdf_fields` and `export_pdf_field_map` — actually no, export is read-only too — `fill_pdf_fields` **refuses** with `XFA_PRESENT` even for the AcroForm side, because pdf-lib's save path can drop or rewrite `/XFA` when AcroForm fields are touched, which would violate the "never mutates XFA" guarantee.
 - **No flattening, no signing.** Filled PDFs remain editable. The human signs manually in a desktop PDF app.
 - **No network.** The server reads and writes local files only. There is no telemetry, no OpenAI/Anthropic call, no cloud sync.
 - **`ALLOWED_DIRS` sandbox.** Every path argument must resolve (via `realpath`) inside the configured allowed directories. Symlinks are followed and re-checked. Defaults: `~/Downloads` and `~/Documents`.
@@ -190,6 +190,6 @@ All tool failures return a structured payload:
 { "ok": false, "error_code": "…", "message": "…", "details": {} }
 ```
 
-Codes: `PATH_NOT_ABSOLUTE`, `PATH_NOT_ALLOWED`, `PDF_NOT_FOUND`, `PDF_PARSE_ERROR`, `PDF_ENCRYPTED`, `PDF_TOO_LARGE`, `UNKNOWN_FIELDS`, `ILLEGAL_VALUES`, `HUMAN_ONLY_FIELDS`, `READ_ONLY_FIELDS`, `OUTPUT_EQUALS_INPUT`, `OUTPUT_BACKUP_FAILED`, `OUTPUT_EXISTS`, `WRITE_FAILED`, `INVALID_INPUT`, `PDF_IDENTITY_MISMATCH`.
+Codes: `PATH_NOT_ABSOLUTE`, `PATH_NOT_ALLOWED`, `PDF_NOT_FOUND`, `PDF_PARSE_ERROR`, `PDF_ENCRYPTED`, `PDF_TOO_LARGE`, `XFA_PRESENT`, `UNKNOWN_FIELDS`, `ILLEGAL_VALUES`, `HUMAN_ONLY_FIELDS`, `READ_ONLY_FIELDS`, `OUTPUT_EQUALS_INPUT`, `OUTPUT_BACKUP_FAILED`, `OUTPUT_EXISTS`, `WRITE_FAILED`, `INVALID_INPUT`, `PDF_IDENTITY_MISMATCH`, `INTERNAL_ERROR`.
 
 A PDF with zero AcroForm fields is a **success** response with `has_fields: false`, not an error.

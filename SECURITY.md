@@ -14,6 +14,7 @@
 - **Never flattens.** `fill_pdf_fields` saves without flattening. Fields remain editable post-fill so a human can still review and sign.
 - **Atomic rejection.** If any field name is unknown, any value is illegal, or any field is human-only, the entire fill operation is rejected before any write. Partial fills are impossible.
 - **Encrypted PDFs are refused** with a structured `PDF_ENCRYPTED` error. The server does not attempt to decrypt or crack passwords.
+- **XFA-bearing PDFs are refused by `fill_pdf_fields`** with `XFA_PRESENT`. The read-side tools (`list_pdf_fields`, `validate_pdf_fill`, `export_pdf_field_map`) detect XFA via `has_xfa: true` and remain available — they never serialize the document. `fill_pdf_fields` is gated because pdf-lib's save path can drop or rewrite `/XFA` when AcroForm fields are touched.
 
 ## Threat model
 

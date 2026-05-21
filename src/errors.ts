@@ -14,7 +14,9 @@ export type ErrorCode =
   | "PDF_IDENTITY_MISMATCH"
   | "OUTPUT_EXISTS"
   | "READ_ONLY_FIELDS"
-  | "PDF_TOO_LARGE";
+  | "PDF_TOO_LARGE"
+  | "XFA_PRESENT"
+  | "INTERNAL_ERROR";
 
 export interface ErrorPayload {
   ok: false;
@@ -59,10 +61,13 @@ export function toErrorPayload(err: unknown): ErrorPayload {
       details: { issues: zerr.issues ?? [] },
     };
   }
+  // Catch-all for unexpected non-domain throws. Previously this returned
+  // PDF_PARSE_ERROR, which pointed callers at the file when the real
+  // problem was an internal bug. INTERNAL_ERROR is the honest code.
   const message = err instanceof Error ? err.message : String(err);
   return {
     ok: false,
-    error_code: "PDF_PARSE_ERROR",
+    error_code: "INTERNAL_ERROR",
     message,
     details: {},
   };

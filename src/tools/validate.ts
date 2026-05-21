@@ -77,7 +77,22 @@ function checkValueAgainstField(field: FieldInfo, proposed: unknown): CheckOutco
       };
     }
     case "checkbox": {
-      if (typeof proposed === "boolean") return { normalized: proposed };
+      if (typeof proposed === "boolean") {
+        // Mirror the fill.ts guard: boolean true on a checkbox with no
+        // readable /AP/N export names cannot be honored without writing a
+        // visually-inconsistent state. (See validateLegalValue in fill.ts.)
+        if (proposed === true && field.options.length === 0) {
+          return {
+            illegal: {
+              reason:
+                "Checkbox has no readable /AP/N export states; cannot honor `true`. Supply the exact export name instead.",
+              legal_options: [],
+            },
+            normalized: proposed,
+          };
+        }
+        return { normalized: proposed };
+      }
       if (proposed === null || proposed === undefined) return { normalized: proposed };
       if (typeof proposed === "string") {
         if (field.options.length === 0) return { normalized: proposed };
@@ -172,7 +187,16 @@ function checkValueAgainstField(field: FieldInfo, proposed: unknown): CheckOutco
         normalized: proposed,
       };
     default:
-      return { normalized: proposed };
+      // type === "unknown" (or anything else we don't recognize). fill.ts
+      // rejects unknown-type fields with ILLEGAL_VALUES; validate must
+      // agree, otherwise safe_to_fill would lie. See issue #1.
+      return {
+        illegal: {
+          reason: `Field type "${field.type}" is not fillable.`,
+          legal_options: [],
+        },
+        normalized: proposed,
+      };
   }
 }
 

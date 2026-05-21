@@ -11,13 +11,33 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { timestamp } from "../utils.js";
 
-// Single source of truth: package.json. Read at module load so an out-of-sync
-// hardcoded constant cannot drift past the next release.
-const __dir = dirname(fileURLToPath(import.meta.url));
-const pkg = JSON.parse(
-  readFileSync(resolve(__dir, "..", "..", "package.json"), "utf-8")
-) as { version: string };
-export const SERVER_VERSION: string = pkg.version;
+// Single source of truth: package.json. The version is read at build time
+// for bundled distributions (esbuild --define injects __BUILD_TIME_VERSION__),
+// and falls back to a runtime read of package.json for the dev tree where
+// package.json sits two levels above this file.
+//
+// The bundled artifact (dist-mcpb/server/index.mjs) does NOT ship
+// package.json alongside, so the runtime read would fail there with ENOENT.
+// The build-time inject closes that gap; the try/catch is belt-and-braces.
+declare const __BUILD_TIME_VERSION__: string | undefined;
+
+function resolveServerVersion(): string {
+  // build-time inject — esbuild replaces this identifier in the bundle
+  if (typeof __BUILD_TIME_VERSION__ !== "undefined" && __BUILD_TIME_VERSION__) {
+    return __BUILD_TIME_VERSION__;
+  }
+  // dev tree — read from the repo's package.json next to src/
+  try {
+    const __dir = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(
+      readFileSync(resolve(__dir, "..", "..", "package.json"), "utf-8")
+    ) as { version: string };
+    return pkg.version;
+  } catch {
+    return "unknown";
+  }
+}
+export const SERVER_VERSION: string = resolveServerVersion();
 
 export const ExportPdfFieldMapInput = z.object({
   pdf_path: z.string().min(1),
