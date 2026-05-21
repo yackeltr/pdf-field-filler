@@ -1,6 +1,6 @@
 {
   "name": "pdf-field-filler",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local MCP server for safely inspecting and filling AcroForm PDFs.",
   "license": "MIT",
   "author": "Tom Yackel",

@@ -6,7 +6,7 @@ import { extractFields } from "../fields.js";
 import { pdfIdentity } from "../identity.js";
 import { PdfFillerError } from "../errors.js";
 
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = "0.3.0";
 
 export const ExportPdfFieldMapInput = z.object({
   pdf_path: z.string().min(1),

@@ -97,17 +97,32 @@ Returns every AcroForm field with exact internal name, type, current value, lega
 
 ### `validate_pdf_fill`
 
-Validates a `{ field_name → proposed_value }` map against the real field map. Returns a review table; never modifies the PDF. Flags signature, human-only, date, attestation/certification, and changed-value fields as `needs_review: true`. Includes PDF identity.
+Validates a `{ field_name → proposed_value }` map against the real field map. Returns a review table; never modifies the PDF. Flags signature, human-only, read-only, date, attestation/certification, and changed-value fields as `needs_review: true`. Includes PDF identity.
+
+The response carries **two** booleans:
+
+| Flag           | Meaning                                                                                           |
+|----------------|---------------------------------------------------------------------------------------------------|
+| `valid`        | No unknown field names, no illegal values. (Structural validity only.)                            |
+| `safe_to_fill` | `valid` AND no supplied field is signature / human-only / read-only / attestation / signing-date. |
+
+Ordinary data dates (DOB, death, service date, …) are `safe_to_fill: true` but `needs_review: true`. The two flags exist so a caller can distinguish "the request would parse" from "the request would actually run through `fill_pdf_fields` without being rejected."
 
 ### `fill_pdf_fields`
 
-Fills validated, non-human-only fields and writes to `output_path`.
-- `output_path` must differ from `pdf_path`.
-- If `output_path` already exists, it is renamed to `<output_path>.backup.<YYYYMMDD-HHMMSS>` before writing.
-- The new file is written via temp-file + `fsync` + atomic `rename`. Temp files are cleaned up on any failure.
+Fills validated, non-human-only, non-read-only fields and writes to `output_path`.
+- `output_path` must differ from `pdf_path`. If `output_path` already exists as a symlink, the symlink target must still be inside `ALLOWED_DIRS`.
+- Write phases (in order): serialize → write temp + fsync → rename existing output to `<output_path>.backup.<YYYYMMDD-HHMMSS>` → atomic rename temp → output.
+- Temp files are cleaned up on any failure.
+- If the final rename fails after the backup-rename, the server **auto-rolls-back** by renaming the backup back to `output_path`. The error response reports `rollback_attempted`, `rollback_succeeded`, `original_error`, and `rollback_error` if any.
 - `dry_run: true` returns a diff table and writes no file.
 - `expected_pdf_sha256` (optional, 64 hex chars) — if provided and the actual input PDF hash differs, the fill is rejected with `PDF_IDENTITY_MISMATCH`.
-- Any unknown field, illegal value, or human-only field rejects the whole operation atomically.
+- Any of the following rejects the whole operation **atomically** (no file written):
+  - unknown field name → `UNKNOWN_FIELDS`
+  - illegal value or option → `ILLEGAL_VALUES`
+  - human-only field (signature, initials, attestation, certification, signing-date) → `HUMAN_ONLY_FIELDS`
+  - read-only field → `READ_ONLY_FIELDS`
+- Checkbox and radio writes set `/V` to the exact export name from `/AP/N` and propagate `/AS` per widget — the selected widget gets `AS = <export>`, all other widgets in the group get `AS = Off`.
 - The PDF is not flattened.
 
 ### `export_pdf_field_map`
@@ -158,4 +173,4 @@ All tool failures return a structured payload:
 { "ok": false, "error_code": "…", "message": "…", "details": {} }
 ```
 
-Codes: `PATH_NOT_ABSOLUTE`, `PATH_NOT_ALLOWED`, `PDF_NOT_FOUND`, `PDF_PARSE_ERROR`, `PDF_ENCRYPTED`, `NO_ACROFORM_FIELDS`, `UNKNOWN_FIELDS`, `ILLEGAL_VALUES`, `HUMAN_ONLY_FIELDS`, `OUTPUT_EQUALS_INPUT`, `OUTPUT_BACKUP_FAILED`, `OUTPUT_EXISTS`, `WRITE_FAILED`, `INVALID_INPUT`, `PDF_IDENTITY_MISMATCH`.
+Codes: `PATH_NOT_ABSOLUTE`, `PATH_NOT_ALLOWED`, `PDF_NOT_FOUND`, `PDF_PARSE_ERROR`, `PDF_ENCRYPTED`, `NO_ACROFORM_FIELDS`, `UNKNOWN_FIELDS`, `ILLEGAL_VALUES`, `HUMAN_ONLY_FIELDS`, `READ_ONLY_FIELDS`, `OUTPUT_EQUALS_INPUT`, `OUTPUT_BACKUP_FAILED`, `OUTPUT_EXISTS`, `WRITE_FAILED`, `INVALID_INPUT`, `PDF_IDENTITY_MISMATCH`.

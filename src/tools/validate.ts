@@ -31,6 +31,7 @@ export interface ReviewEntry {
   legal_options: string[];
   is_signature_field: boolean;
   is_human_only: boolean;
+  is_read_only: boolean;
   is_required: boolean;
   needs_review: boolean;
   review_reason: string;
@@ -38,6 +39,7 @@ export interface ReviewEntry {
 
 export interface ValidateResult extends PdfIdentity {
   valid: boolean;
+  safe_to_fill: boolean;
   unknown_fields: string[];
   illegal_values: IllegalValueEntry[];
   review: ReviewEntry[];
@@ -195,6 +197,7 @@ export async function validatePdfFill(input: ValidatePdfFillInputT): Promise<Val
   const unknown_fields: string[] = [];
   const illegal_values: IllegalValueEntry[] = [];
   const review: ReviewEntry[] = [];
+  let anyBlocking = false;
 
   for (const [key, proposed] of Object.entries(input.field_values)) {
     const field = byName.get(key);
@@ -217,23 +220,33 @@ export async function validatePdfFill(input: ValidatePdfFillInputT): Promise<Val
       needs_review = true;
     }
 
+    let blocking = false;
     if (field.is_signature_field) {
-      reasons.push("signature field");
+      reasons.push("signature field — not fillable by this server");
       needs_review = true;
+      blocking = true;
     }
     if (field.is_human_only) {
-      reasons.push("human-only field");
+      reasons.push("human-only field — not fillable by this server");
       needs_review = true;
+      blocking = true;
+    }
+    if (field.is_read_only) {
+      reasons.push("read-only field — fill_pdf_fields will reject the request");
+      needs_review = true;
+      blocking = true;
     }
     if (looksLikeAttestationCheckbox(field)) {
-      reasons.push("attestation/certification checkbox");
+      reasons.push("attestation/certification checkbox — must be left to the human");
       needs_review = true;
+      blocking = true;
     }
     if (looksLikeDateField(field.name)) {
       if (looksLikeOrdinaryDataDate(field.name)) {
         reasons.push("data date — confirm format and value");
       } else {
-        reasons.push("signing/execution date — should not be filled by the model");
+        reasons.push("signing/execution date — not fillable by this server");
+        blocking = true;
       }
       needs_review = true;
     }
@@ -257,15 +270,21 @@ export async function validatePdfFill(input: ValidatePdfFillInputT): Promise<Val
       legal_options: field.options,
       is_signature_field: field.is_signature_field,
       is_human_only: field.is_human_only,
+      is_read_only: field.is_read_only,
       is_required: field.is_required,
       needs_review,
       review_reason: reasons.join("; "),
     });
+    if (blocking) anyBlocking = true;
   }
+
+  const valid = unknown_fields.length === 0 && illegal_values.length === 0;
+  const safe_to_fill = valid && !anyBlocking;
 
   return {
     ...identity,
-    valid: unknown_fields.length === 0 && illegal_values.length === 0,
+    valid,
+    safe_to_fill,
     unknown_fields,
     illegal_values,
     review,

@@ -20,6 +20,7 @@ import {
   PDFDropdown,
   PDFOptionList,
   PDFName,
+  PDFDict,
 } from "pdf-lib";
 
 export const FillPdfFieldsInput = z.object({
@@ -69,15 +70,47 @@ function isSkipValue(v: unknown): boolean {
   return v === null || v === undefined;
 }
 
-function setCheckboxToExport(f: PDFCheckBox, exportName: string): void {
-  // Write /V to the exact export name from /AP/N so a non-standard checkbox
-  // (e.g. "Yes", "1", or any custom name) is preserved across the round-trip.
-  // pdf-lib's PDFCheckBox.check() looks up an "on" value internally and may
-  // pick the wrong appearance state if multiple non-Off keys exist.
-  const target = PDFName.of(exportName);
-  f.acroField.setValue(target);
-  for (const widget of f.acroField.getWidgets()) {
-    widget.dict.set(PDFName.of("AS"), target);
+function widgetOnName(widgetDict: PDFDict): string | null {
+  const ap = widgetDict.lookup(PDFName.of("AP"));
+  if (!(ap instanceof PDFDict)) return null;
+  const n = ap.lookup(PDFName.of("N"));
+  if (!(n instanceof PDFDict)) return null;
+  for (const k of n.keys()) {
+    const name = k.decodeText();
+    if (name !== "Off") return name;
+  }
+  return null;
+}
+
+function applyBtnExport(
+  widgets: Array<{ dict: PDFDict }>,
+  acroSetValue: (v: PDFName) => void,
+  selectedExport: string
+): void {
+  // 1) Logical /V on the field is the selected export name.
+  acroSetValue(PDFName.of(selectedExport));
+  // 2) Per-widget /AS: only the widget whose own /AP/N exposes the selected
+  //    export gets /AS = selected. Every other widget in the group is
+  //    explicitly reset to /Off so no stale appearance lingers from a prior
+  //    selection. This is what makes the visible button match /V across all
+  //    viewers, including those that don't rebuild appearances from /V alone.
+  const offName = PDFName.of("Off");
+  const targetName = PDFName.of(selectedExport);
+  for (const w of widgets) {
+    const own = widgetOnName(w.dict);
+    if (own === selectedExport) {
+      w.dict.set(PDFName.of("AS"), targetName);
+    } else {
+      w.dict.set(PDFName.of("AS"), offName);
+    }
+  }
+}
+
+function uncheckBtn(widgets: Array<{ dict: PDFDict }>, acroSetValue: (v: PDFName) => void): void {
+  acroSetValue(PDFName.of("Off"));
+  const offName = PDFName.of("Off");
+  for (const w of widgets) {
+    w.dict.set(PDFName.of("AS"), offName);
   }
 }
 
@@ -211,6 +244,7 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
 
   const unknown_fields: string[] = [];
   const blocked_human_only_fields: string[] = [];
+  const blocked_read_only_fields: string[] = [];
   const illegal_values: FillResult["illegal_values"] = [];
   const skipped: FillResult["skipped"] = [];
 
@@ -226,12 +260,12 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
       blocked_human_only_fields.push(key);
       continue;
     }
-    if (isSkipValue(proposed)) {
-      skipped.push({ field_name: key, reason: "value is null/undefined" });
+    if (field.is_read_only) {
+      blocked_read_only_fields.push(key);
       continue;
     }
-    if (field.is_read_only) {
-      skipped.push({ field_name: key, reason: "field is read-only" });
+    if (isSkipValue(proposed)) {
+      skipped.push({ field_name: key, reason: "value is null/undefined" });
       continue;
     }
     const check = validateLegalValue(field, proposed);
@@ -259,6 +293,13 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
       "HUMAN_ONLY_FIELDS",
       `Refused to fill human-only fields: ${blocked_human_only_fields.join(", ")}`,
       { blocked_human_only_fields }
+    );
+  }
+  if (blocked_read_only_fields.length > 0) {
+    throw new PdfFillerError(
+      "READ_ONLY_FIELDS",
+      `Refused to fill read-only fields: ${blocked_read_only_fields.join(", ")}`,
+      { blocked_read_only_fields }
     );
   }
   if (illegal_values.length > 0) {
@@ -305,27 +346,22 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
           const f = form.getField(fieldName) as PDFCheckBox;
           if (!(f instanceof PDFCheckBox)) throw new Error("expected checkbox");
           const v = p.normalized;
+          const widgets = f.acroField.getWidgets();
+          const set = (n: PDFName) => f.acroField.setValue(n);
           if (typeof v === "boolean") {
-            if (!v) {
-              f.uncheck();
-            } else if (p.field.options.length > 0) {
-              // Honor the exact /AP/N export name detected at extract time.
-              setCheckboxToExport(f, p.field.options[0]);
-            } else {
-              f.check();
-            }
+            if (!v) uncheckBtn(widgets, set);
+            else applyBtnExport(widgets, set, p.field.options[0] ?? "Yes");
           } else if (typeof v === "string") {
-            if (v === "Off") f.uncheck();
-            else setCheckboxToExport(f, v);
+            if (v === "Off") uncheckBtn(widgets, set);
+            else applyBtnExport(widgets, set, v);
           }
           break;
         }
         case "radio": {
           const f = form.getField(fieldName) as PDFRadioGroup;
           if (!(f instanceof PDFRadioGroup)) throw new Error("expected radio group");
-          // Select via the exact export name from /AP/N rather than relying on
-          // pdf-lib's option-list lookup, which may normalize option strings.
-          f.acroField.setValue(PDFName.of(p.normalized as string));
+          const widgets = f.acroField.getWidgets();
+          applyBtnExport(widgets, (n) => f.acroField.setValue(n), p.normalized as string);
           break;
         }
         case "dropdown": {
@@ -412,19 +448,43 @@ export async function fillPdfFields(input: FillPdfFieldsInputT): Promise<FillRes
   try {
     renameSync(tmpPath, resolvedOutput);
   } catch (err) {
+    const original_error = (err as Error).message;
+    // Clean up the temp file if it's still around.
     try {
       if (existsSync(tmpPath)) unlinkSync(tmpPath);
     } catch {
       /* best-effort */
     }
+    // If we moved the previous output to backup and nothing now lives at
+    // output_path, try to undo the backup so the caller's filesystem returns
+    // to its pre-fill state. Only rename back if output_path is empty (we
+    // don't want to clobber a file that some other process wrote in the gap).
+    let rollback_attempted = false;
+    let rollback_succeeded = false;
+    let rollback_error: string | undefined;
+    if (backup_path && !existsSync(resolvedOutput)) {
+      rollback_attempted = true;
+      try {
+        renameSync(backup_path, resolvedOutput);
+        rollback_succeeded = true;
+      } catch (rbErr) {
+        rollback_error = (rbErr as Error).message;
+      }
+    }
     throw new PdfFillerError(
       "WRITE_FAILED",
-      `Failed to publish output PDF: ${(err as Error).message}`,
+      `Failed to publish output PDF: ${original_error}`,
       {
         output_path: resolvedOutput,
         backup_path,
-        recovery_hint: backup_path
-          ? "The pre-existing output file has been preserved as backup_path; rename it back to recover."
+        rollback_attempted,
+        rollback_succeeded,
+        original_error,
+        ...(rollback_error ? { rollback_error } : {}),
+        recovery_hint: rollback_succeeded
+          ? "Auto-rollback restored the pre-existing output file from backup."
+          : backup_path
+          ? "The pre-existing output is preserved at backup_path; rename it back to recover."
           : "No prior output existed; nothing to recover.",
       }
     );

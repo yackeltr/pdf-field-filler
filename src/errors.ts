@@ -13,7 +13,8 @@ export type ErrorCode =
   | "WRITE_FAILED"
   | "INVALID_INPUT"
   | "PDF_IDENTITY_MISMATCH"
-  | "OUTPUT_EXISTS";
+  | "OUTPUT_EXISTS"
+  | "READ_ONLY_FIELDS";
 
 export interface ErrorPayload {
   ok: false;

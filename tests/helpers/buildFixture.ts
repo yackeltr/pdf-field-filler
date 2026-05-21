@@ -309,6 +309,90 @@ export async function buildDropdownPairsPdf(): Promise<FixturePaths> {
   return { dir, pdf };
 }
 
+export async function buildReadOnlyPdf(): Promise<FixturePaths> {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const ctx = doc.context;
+
+  // A read-only text field (Ff = 1 << 0).
+  const ro = ctx.obj({}) as PDFDict;
+  ro.set(PDFName.of("T"), PDFString.of("Locked"));
+  ro.set(PDFName.of("FT"), PDFName.of("Tx"));
+  ro.set(PDFName.of("Ff"), PDFNumber.of(1));
+  ro.set(PDFName.of("V"), PDFString.of("immutable"));
+  ro.set(PDFName.of("Subtype"), PDFName.of("Widget"));
+  ro.set(
+    PDFName.of("Rect"),
+    ctx.obj([PDFNumber.of(50), PDFNumber.of(700), PDFNumber.of(250), PDFNumber.of(720)]) as PDFArray
+  );
+  const roRef = ctx.register(ro);
+
+  // A normal writable text field for the same fixture.
+  const rw = ctx.obj({}) as PDFDict;
+  rw.set(PDFName.of("T"), PDFString.of("Editable"));
+  rw.set(PDFName.of("FT"), PDFName.of("Tx"));
+  rw.set(PDFName.of("Subtype"), PDFName.of("Widget"));
+  rw.set(
+    PDFName.of("Rect"),
+    ctx.obj([PDFNumber.of(50), PDFNumber.of(660), PDFNumber.of(250), PDFNumber.of(680)]) as PDFArray
+  );
+  const rwRef = ctx.register(rw);
+
+  const af = ctx.obj({}) as PDFDict;
+  const fields = ctx.obj([]) as PDFArray;
+  fields.push(roRef);
+  fields.push(rwRef);
+  af.set(PDFName.of("Fields"), fields);
+  doc.catalog.set(PDFName.of("AcroForm"), af);
+
+  const annots = ctx.obj([]) as PDFArray;
+  annots.push(roRef);
+  annots.push(rwRef);
+  page.node.set(PDFName.of("Annots"), annots);
+
+  const bytes = await doc.save();
+  const dir = mkdtempSync(path.join(tmpdir(), "pdffieldfiller-"));
+  const pdf = path.join(dir, "ro.pdf");
+  writeFileSync(pdf, bytes);
+  return { dir, pdf };
+}
+
+export async function buildMixedXfaPdf(): Promise<FixturePaths> {
+  // AcroForm with one named text field PLUS an /XFA entry. Build entirely
+  // via low-level dicts so pdf-lib's save path doesn't strip /XFA (it strips
+  // XFA whenever it touches PDFAcroForm via the high-level Form API).
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const ctx = doc.context;
+
+  const widget = ctx.obj({}) as PDFDict;
+  widget.set(PDFName.of("T"), PDFString.of("Name"));
+  widget.set(PDFName.of("FT"), PDFName.of("Tx"));
+  widget.set(PDFName.of("Subtype"), PDFName.of("Widget"));
+  widget.set(
+    PDFName.of("Rect"),
+    ctx.obj([PDFNumber.of(50), PDFNumber.of(700), PDFNumber.of(250), PDFNumber.of(720)]) as PDFArray
+  );
+  const widgetRef = ctx.register(widget);
+
+  const af = ctx.obj({}) as PDFDict;
+  const fields = ctx.obj([]) as PDFArray;
+  fields.push(widgetRef);
+  af.set(PDFName.of("Fields"), fields);
+  af.set(PDFName.of("XFA"), PDFString.of("<xfa/>"));
+  doc.catalog.set(PDFName.of("AcroForm"), af);
+
+  const annots = ctx.obj([]) as PDFArray;
+  annots.push(widgetRef);
+  page.node.set(PDFName.of("Annots"), annots);
+
+  const bytes = await doc.save();
+  const dir = mkdtempSync(path.join(tmpdir(), "pdffieldfiller-"));
+  const pdf = path.join(dir, "mixed.pdf");
+  writeFileSync(pdf, bytes);
+  return { dir, pdf };
+}
+
 export async function buildXfaPdf(): Promise<FixturePaths> {
   const doc = await PDFDocument.create();
   doc.addPage([612, 792]);

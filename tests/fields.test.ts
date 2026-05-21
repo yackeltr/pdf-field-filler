@@ -6,6 +6,8 @@ import {
   buildXfaPdf,
   buildCheckboxRadioPdf,
   buildDropdownPairsPdf,
+  buildReadOnlyPdf,
+  buildMixedXfaPdf,
   FixturePaths,
 } from "./helpers/buildFixture.js";
 import { listPdfFields } from "../src/tools/list.js";
@@ -27,6 +29,8 @@ let inherit: FixturePaths;
 let xfa: FixturePaths;
 let btn: FixturePaths;
 let ddPairs: FixturePaths;
+let ro: FixturePaths;
+let mixedXfa: FixturePaths;
 
 beforeAll(async () => {
   fx = await buildKitchenSinkPdf();
@@ -35,7 +39,18 @@ beforeAll(async () => {
   xfa = await buildXfaPdf();
   btn = await buildCheckboxRadioPdf();
   ddPairs = await buildDropdownPairsPdf();
-  process.env.ALLOWED_DIRS = `${fx.dir},${empty.dir},${inherit.dir},${xfa.dir},${btn.dir},${ddPairs.dir}`;
+  ro = await buildReadOnlyPdf();
+  mixedXfa = await buildMixedXfaPdf();
+  process.env.ALLOWED_DIRS = [
+    fx.dir,
+    empty.dir,
+    inherit.dir,
+    xfa.dir,
+    btn.dir,
+    ddPairs.dir,
+    ro.dir,
+    mixedXfa.dir,
+  ].join(",");
 });
 
 describe("isHumanOnlyName", () => {
@@ -690,6 +705,187 @@ describe("looksLikeDateField false-positive (#13)", () => {
     expect(looksLikeDateField("Last_Updated")).toBe(false);
     expect(looksLikeDateField("Updated")).toBe(false);
     expect(looksLikeDateField("UpdateDate")).toBe(true);
+  });
+});
+
+describe("read-only blocking (#2)", () => {
+  it("list_pdf_fields marks read-only field correctly", async () => {
+    const r = await listPdfFields({ pdf_path: ro.pdf });
+    const f = r.fields?.find((x) => x.name === "Locked");
+    expect(f?.is_read_only).toBe(true);
+  });
+  it("fill_pdf_fields rejects atomically when any read-only field is supplied", async () => {
+    const out = path.join(ro.dir, "ro-blocked.pdf");
+    await expect(
+      fillPdfFields({
+        pdf_path: ro.pdf,
+        output_path: out,
+        field_values: { Editable: "ok", Locked: "nope" },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "READ_ONLY_FIELDS" });
+    const fs = await import("node:fs");
+    expect(fs.existsSync(out)).toBe(false);
+  });
+  it("dry_run also rejects read-only fields", async () => {
+    const out = path.join(ro.dir, "ro-dry.pdf");
+    await expect(
+      fillPdfFields({
+        pdf_path: ro.pdf,
+        output_path: out,
+        field_values: { Locked: "x" },
+        dry_run: true,
+      })
+    ).rejects.toMatchObject({ code: "READ_ONLY_FIELDS" });
+  });
+  it("validate_pdf_fill marks read-only with needs_review and is_read_only", async () => {
+    const r = await validatePdfFill({
+      pdf_path: ro.pdf,
+      field_values: { Locked: "x" },
+    });
+    const row = r.review.find((x) => x.field_name === "Locked");
+    expect(row?.is_read_only).toBe(true);
+    expect(row?.needs_review).toBe(true);
+    expect(row?.review_reason).toMatch(/read-only/);
+  });
+});
+
+describe("safe_to_fill (#3)", () => {
+  it("ordinary data date: valid=true, safe_to_fill=true, needs_review=true", async () => {
+    const r = await validatePdfFill({
+      pdf_path: fx.pdf,
+      field_values: { Date_Of_Birth: "1990-01-01" },
+    });
+    expect(r.valid).toBe(true);
+    expect(r.safe_to_fill).toBe(true);
+    expect(r.review[0]?.needs_review).toBe(true);
+  });
+  it("signature field: safe_to_fill=false", async () => {
+    const r = await validatePdfFill({
+      pdf_path: fx.pdf,
+      field_values: { Signature_Line: "Jane" },
+    });
+    expect(r.safe_to_fill).toBe(false);
+  });
+  it("read-only field: safe_to_fill=false", async () => {
+    const r = await validatePdfFill({
+      pdf_path: ro.pdf,
+      field_values: { Locked: "x" },
+    });
+    expect(r.safe_to_fill).toBe(false);
+  });
+  it("signing date: safe_to_fill=false", async () => {
+    const r = await validatePdfFill({
+      pdf_path: fx.pdf,
+      field_values: { Date_Signed: "2026-01-01" },
+    });
+    expect(r.safe_to_fill).toBe(false);
+  });
+  it("unknown field: valid=false, safe_to_fill=false", async () => {
+    const r = await validatePdfFill({
+      pdf_path: fx.pdf,
+      field_values: { Bogus: "x" },
+    });
+    expect(r.valid).toBe(false);
+    expect(r.safe_to_fill).toBe(false);
+  });
+  it("illegal radio option: valid=false, safe_to_fill=false", async () => {
+    const r = await validatePdfFill({
+      pdf_path: btn.pdf,
+      field_values: { Relationship: "Sibling" },
+    });
+    expect(r.valid).toBe(false);
+    expect(r.safe_to_fill).toBe(false);
+  });
+  it("mix of fillable and blocked: safe_to_fill=false", async () => {
+    const r = await validatePdfFill({
+      pdf_path: fx.pdf,
+      field_values: { FirstName: "Ok", Signature_Line: "X" },
+    });
+    expect(r.valid).toBe(true);
+    expect(r.safe_to_fill).toBe(false);
+  });
+});
+
+describe("explicit per-widget /AS (#1)", () => {
+  it("checkbox: only the matching widget has AS=export, all others (none in this fixture) implicitly Off", async () => {
+    const out = path.join(btn.dir, "as-cb.pdf");
+    await fillPdfFields({
+      pdf_path: btn.pdf,
+      output_path: out,
+      field_values: { AgreeYes: true },
+      dry_run: false,
+    });
+    const fs = await import("node:fs");
+    const { PDFDocument, PDFName, PDFArray, PDFDict } = await import("pdf-lib");
+    const doc = await PDFDocument.load(fs.readFileSync(out));
+    const af = doc.catalog.lookup(PDFName.of("AcroForm")) as InstanceType<typeof PDFDict>;
+    const fields = af.lookup(PDFName.of("Fields")) as InstanceType<typeof PDFArray>;
+    let cb: InstanceType<typeof PDFDict> | null = null;
+    for (let i = 0; i < fields.size(); i++) {
+      const d = fields.lookup(i) as InstanceType<typeof PDFDict>;
+      const t = d.lookup(PDFName.of("T")) as any;
+      if (t?.decodeText && t.decodeText() === "AgreeYes") {
+        cb = d;
+        break;
+      }
+    }
+    expect(cb).toBeTruthy();
+    const as = cb!.get(PDFName.of("AS")) as any;
+    expect(as?.decodeText?.()).toBe("Yes");
+  });
+  it("radio after re-selection: exactly one widget AS=selected, others AS=Off (regression pin)", async () => {
+    const out1 = path.join(btn.dir, "as-r1.pdf");
+    await fillPdfFields({
+      pdf_path: btn.pdf,
+      output_path: out1,
+      field_values: { Relationship: "Other" },
+      dry_run: false,
+    });
+    const out2 = path.join(btn.dir, "as-r2.pdf");
+    await fillPdfFields({
+      pdf_path: out1,
+      output_path: out2,
+      field_values: { Relationship: "Child" },
+      dry_run: false,
+    });
+    const fs = await import("node:fs");
+    const { PDFDocument, PDFName, PDFArray, PDFDict } = await import("pdf-lib");
+    const doc = await PDFDocument.load(fs.readFileSync(out2));
+    const af = doc.catalog.lookup(PDFName.of("AcroForm")) as InstanceType<typeof PDFDict>;
+    const fields = af.lookup(PDFName.of("Fields")) as InstanceType<typeof PDFArray>;
+    let rg: InstanceType<typeof PDFDict> | null = null;
+    for (let i = 0; i < fields.size(); i++) {
+      const d = fields.lookup(i) as InstanceType<typeof PDFDict>;
+      const t = d.lookup(PDFName.of("T")) as any;
+      if (t?.decodeText && t.decodeText() === "Relationship") {
+        rg = d;
+        break;
+      }
+    }
+    expect(rg).toBeTruthy();
+    const kids = rg!.lookup(PDFName.of("Kids")) as InstanceType<typeof PDFArray>;
+    const asStates: string[] = [];
+    for (let i = 0; i < kids.size(); i++) {
+      const k = kids.lookup(i) as InstanceType<typeof PDFDict>;
+      const as = k.get(PDFName.of("AS")) as any;
+      asStates.push(as?.decodeText ? as.decodeText() : String(as));
+    }
+    expect(asStates.filter((s) => s !== "Off")).toEqual(["Child"]);
+    expect(asStates.filter((s) => s === "Off").length).toBe(2);
+    const v = rg!.get(PDFName.of("V")) as any;
+    expect(v?.decodeText?.()).toBe("Child");
+  });
+});
+
+describe("mixed XFA + AcroForm (#6)", () => {
+  it("lists AcroForm fields and flags has_xfa with a warning", async () => {
+    const r = await listPdfFields({ pdf_path: mixedXfa.pdf });
+    expect(r.has_xfa).toBe(true);
+    expect(r.xfa_supported).toBe(false);
+    expect(r.has_fields).toBe(true);
+    expect(r.fields?.some((f) => f.name === "Name")).toBe(true);
+    expect(typeof r.message).toBe("string");
   });
 });
 

@@ -27,6 +27,19 @@ function takeFlag(args: string[], name: string): string | undefined {
   return v;
 }
 
+function takeBoolFlag(args: string[], name: string): boolean {
+  const i = args.indexOf(name);
+  if (i === -1) return false;
+  args.splice(i, 1);
+  return true;
+}
+
+function rejectExtras(args: string[]): void {
+  if (args.length === 0) return;
+  process.stderr.write(`Unexpected argument(s): ${args.join(" ")}\n`);
+  usage();
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd) usage();
@@ -64,12 +77,15 @@ async function main() {
       return;
     }
     if (cmd === "export-map") {
-      const [p, op, flag] = rest;
+      const argsCopy = [...rest];
+      const overwrite = takeBoolFlag(argsCopy, "--overwrite");
+      const [p, op, ...extras] = argsCopy;
       if (!p || !op) usage();
+      rejectExtras(extras);
       const r = await exportPdfFieldMap({
         pdf_path: p,
         output_json_path: op,
-        overwrite: flag === "--overwrite",
+        overwrite,
       });
       process.stdout.write(JSON.stringify(r, null, 2) + "\n");
       return;
