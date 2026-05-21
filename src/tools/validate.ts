@@ -56,7 +56,17 @@ function checkValueAgainstField(field: FieldInfo, proposed: unknown): CheckOutco
   switch (type) {
     case "text": {
       if (typeof proposed === "string" || typeof proposed === "number") {
-        return { normalized: String(proposed) };
+        const s = String(proposed);
+        if (field.max_length !== null && s.length > field.max_length) {
+          return {
+            illegal: {
+              reason: `Value length ${s.length} exceeds MaxLen ${field.max_length}.`,
+              legal_options: [],
+            },
+            normalized: s,
+          };
+        }
+        return { normalized: s };
       }
       if (proposed === null || proposed === undefined) {
         return { normalized: proposed };

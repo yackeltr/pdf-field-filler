@@ -6,7 +6,18 @@ import { extractFieldsFromDoc, loadPdfFromBytes } from "../fields.js";
 import { readPdfWithIdentity } from "../identity.js";
 import { PdfFillerError } from "../errors.js";
 
-export const SERVER_VERSION = "0.3.1";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { timestamp } from "../utils.js";
+
+// Single source of truth: package.json. Read at module load so an out-of-sync
+// hardcoded constant cannot drift past the next release.
+const __dir = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(
+  readFileSync(resolve(__dir, "..", "..", "package.json"), "utf-8")
+) as { version: string };
+export const SERVER_VERSION: string = pkg.version;
 
 export const ExportPdfFieldMapInput = z.object({
   pdf_path: z.string().min(1),
@@ -27,19 +38,6 @@ export interface ExportPdfFieldMapResult {
   xfa_supported: boolean;
 }
 
-function timestamp(): string {
-  const d = new Date();
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  return (
-    d.getFullYear().toString() +
-    pad(d.getMonth() + 1) +
-    pad(d.getDate()) +
-    "-" +
-    pad(d.getHours()) +
-    pad(d.getMinutes()) +
-    pad(d.getSeconds())
-  );
-}
 
 export async function exportPdfFieldMap(input: ExportPdfFieldMapInputT): Promise<ExportPdfFieldMapResult> {
   const resolvedInput = assertAllowedPath(input.pdf_path, { mustExist: true });

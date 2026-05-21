@@ -9,6 +9,8 @@ import {
   buildReadOnlyPdf,
   buildMixedXfaPdf,
   buildHeterogeneousCheckboxPdf,
+  buildCircularKidsPdf,
+  buildMaxLenPdf,
   FixturePaths,
 } from "./helpers/buildFixture.js";
 import { listPdfFields } from "../src/tools/list.js";
@@ -33,6 +35,8 @@ let ddPairs: FixturePaths;
 let ro: FixturePaths;
 let mixedXfa: FixturePaths;
 let heteroCb: FixturePaths;
+let cyclic: FixturePaths;
+let maxLen: FixturePaths;
 
 beforeAll(async () => {
   fx = await buildKitchenSinkPdf();
@@ -44,6 +48,8 @@ beforeAll(async () => {
   ro = await buildReadOnlyPdf();
   mixedXfa = await buildMixedXfaPdf();
   heteroCb = await buildHeterogeneousCheckboxPdf();
+  cyclic = await buildCircularKidsPdf();
+  maxLen = await buildMaxLenPdf();
   process.env.ALLOWED_DIRS = [
     fx.dir,
     empty.dir,
@@ -54,6 +60,8 @@ beforeAll(async () => {
     ro.dir,
     mixedXfa.dir,
     heteroCb.dir,
+    cyclic.dir,
+    maxLen.dir,
   ].join(",");
 });
 
@@ -1067,6 +1075,92 @@ describe("mixed XFA + AcroForm (#6)", () => {
     expect(r.has_fields).toBe(true);
     expect(r.fields?.some((f) => f.name === "Name")).toBe(true);
     expect(typeof r.message).toBe("string");
+  });
+});
+
+describe("walkFields cycle guard (P0-1)", () => {
+  it("does not stack-overflow on a circular Kids tree", async () => {
+    // Fixture: A.Kids = [B], B.Kids = [A]. Without a guard, walkFields would
+    // recurse until the JS stack is exhausted (RangeError). The point of
+    // this test is that the call *returns* — not that any particular field
+    // is emitted (the cycle structure happens to have no leaf to emit).
+    const r = await listPdfFields({ pdf_path: cyclic.pdf });
+    expect(typeof r.field_count).toBe("number");
+    expect(r.field_count).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("file-size guard (P0-2)", () => {
+  it("rejects a file larger than PDF_FIELD_FILLER_MAX_BYTES with PDF_TOO_LARGE", async () => {
+    const prev = process.env.PDF_FIELD_FILLER_MAX_BYTES;
+    process.env.PDF_FIELD_FILLER_MAX_BYTES = "100"; // 100 bytes — every fixture exceeds this
+    try {
+      await expect(listPdfFields({ pdf_path: fx.pdf })).rejects.toMatchObject({
+        code: "PDF_TOO_LARGE",
+      });
+    } finally {
+      if (prev === undefined) delete process.env.PDF_FIELD_FILLER_MAX_BYTES;
+      else process.env.PDF_FIELD_FILLER_MAX_BYTES = prev;
+    }
+  });
+});
+
+describe("MaxLen enforcement (P1-2)", () => {
+  it("validate flags an over-MaxLen text value as illegal (not safe_to_fill)", async () => {
+    const r = await validatePdfFill({
+      pdf_path: maxLen.pdf,
+      field_values: { Short: "ABCDEFGH" },
+    });
+    expect(r.valid).toBe(false);
+    expect(r.safe_to_fill).toBe(false);
+    expect(r.illegal_values[0]?.reason).toMatch(/MaxLen/);
+  });
+  it("fill rejects ILLEGAL_VALUES when a text value exceeds MaxLen", async () => {
+    const out = path.join(maxLen.dir, "ml-out.pdf");
+    await expect(
+      fillPdfFields({
+        pdf_path: maxLen.pdf,
+        output_path: out,
+        field_values: { Short: "ABCDEFGH" },
+        dry_run: false,
+      })
+    ).rejects.toMatchObject({ code: "ILLEGAL_VALUES" });
+    const fs = await import("node:fs");
+    expect(fs.existsSync(out)).toBe(false);
+  });
+  it("fill accepts a value at exactly MaxLen", async () => {
+    const out = path.join(maxLen.dir, "ml-ok.pdf");
+    const r = await fillPdfFields({
+      pdf_path: maxLen.pdf,
+      output_path: out,
+      field_values: { Short: "ABCDE" },
+      dry_run: false,
+    });
+    expect(r.dry_run).toBe(false);
+  });
+});
+
+describe("toErrorPayload: ZodError → INVALID_INPUT (P1-1)", () => {
+  it("classifies a ZodError as INVALID_INPUT, not PDF_PARSE_ERROR", async () => {
+    const { toErrorPayload } = await import("../src/errors.js");
+    const { z } = await import("zod");
+    let zerr: unknown;
+    try {
+      z.object({ pdf_path: z.string() }).parse({ pdf_path: 42 });
+    } catch (e) {
+      zerr = e;
+    }
+    const payload = toErrorPayload(zerr);
+    expect(payload.error_code).toBe("INVALID_INPUT");
+  });
+});
+
+describe("SERVER_VERSION matches package.json (P1-6)", () => {
+  it("matches the version field in package.json at module load time", async () => {
+    const { SERVER_VERSION } = await import("../src/tools/export.js");
+    const fs = await import("node:fs");
+    const pkg = JSON.parse(fs.readFileSync("package.json", "utf-8"));
+    expect(SERVER_VERSION).toBe(pkg.version);
   });
 });
 

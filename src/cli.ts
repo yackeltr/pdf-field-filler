@@ -63,8 +63,9 @@ async function main() {
     if (cmd === "dry-run" || cmd === "fill") {
       const argsCopy = [...rest];
       const expected = takeFlag(argsCopy, "--expected-sha256");
-      const [p, op, vp] = argsCopy;
+      const [p, op, vp, ...extras] = argsCopy;
       if (!p || !op || !vp) usage();
+      rejectExtras(extras);
       const field_values = JSON.parse(readFileSync(vp, "utf8")) as Record<string, unknown>;
       const r = await fillPdfFields({
         pdf_path: p,

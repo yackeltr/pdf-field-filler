@@ -564,17 +564,35 @@ function buildFieldInfo(
   };
 }
 
+// Hard caps to prevent stack overflow / runaway from a circular or
+// pathologically deep AcroForm tree in a malicious or corrupt PDF.
+const MAX_FIELD_TREE_DEPTH = 64;
+const MAX_FIELD_NODES = 100_000;
+
 function walkFields(
   fieldRefs: PDFArray,
   parentDict: PDFDict,
   parentStack: PDFDict[],
   out: FieldInfo[],
-  pageIndex: PageIndex
+  pageIndex: PageIndex,
+  visited: Set<string>,
+  depth: number
 ): void {
+  if (depth > MAX_FIELD_TREE_DEPTH) return;
   for (let i = 0; i < fieldRefs.size(); i++) {
+    if (out.length >= MAX_FIELD_NODES) return;
     const ref = fieldRefs.get(i);
     const child = fieldRefs.lookup(i);
     if (!(child instanceof PDFDict)) continue;
+    // Cycle guard: indirect refs are stable identities; if we've seen this
+    // ref before, recursing again would loop. (Inline non-ref child dicts
+    // can't form a cycle because they don't have a stable identity to point
+    // back at, but we still cap by depth above.)
+    if (ref instanceof PDFRef) {
+      const key = ref.toString();
+      if (visited.has(key)) continue;
+      visited.add(key);
+    }
     const stack = [...parentStack, child];
 
     const hasOwnT = !!child.get(PDFName.of("T"));
@@ -593,7 +611,7 @@ function walkFields(
 
     if (hasKidsAsFields) {
       const kids = child.lookup(PDFName.of("Kids")) as PDFArray;
-      walkFields(kids, child, stack, out, pageIndex);
+      walkFields(kids, child, stack, out, pageIndex, visited, depth + 1);
       continue;
     }
 
@@ -645,7 +663,7 @@ export async function extractFieldsFromDoc(doc: PDFDocument): Promise<FieldExtra
   }
   const pageIndex = buildPageIndex(doc);
   const fields: FieldInfo[] = [];
-  walkFields(fieldsArr, af, [], fields, pageIndex);
+  walkFields(fieldsArr, af, [], fields, pageIndex, new Set<string>(), 0);
   return {
     has_fields: fields.length > 0,
     field_count: fields.length,

@@ -4,7 +4,6 @@ export type ErrorCode =
   | "PDF_NOT_FOUND"
   | "PDF_PARSE_ERROR"
   | "PDF_ENCRYPTED"
-  | "NO_ACROFORM_FIELDS"
   | "UNKNOWN_FIELDS"
   | "ILLEGAL_VALUES"
   | "HUMAN_ONLY_FIELDS"
@@ -14,7 +13,8 @@ export type ErrorCode =
   | "INVALID_INPUT"
   | "PDF_IDENTITY_MISMATCH"
   | "OUTPUT_EXISTS"
-  | "READ_ONLY_FIELDS";
+  | "READ_ONLY_FIELDS"
+  | "PDF_TOO_LARGE";
 
 export interface ErrorPayload {
   ok: false;
@@ -46,6 +46,19 @@ export class PdfFillerError extends Error {
 
 export function toErrorPayload(err: unknown): ErrorPayload {
   if (err instanceof PdfFillerError) return err.toPayload();
+  // ZodError comes from tool input parsing — it's an input contract failure,
+  // not a PDF problem. Returning PDF_PARSE_ERROR here would mislead the
+  // caller into looking at the file instead of the arguments. Detect by
+  // shape rather than by importing zod (avoids a hard dep in this module).
+  if (err && typeof err === "object" && (err as { name?: string }).name === "ZodError") {
+    const zerr = err as { issues?: unknown[]; message?: string };
+    return {
+      ok: false,
+      error_code: "INVALID_INPUT",
+      message: zerr.message ?? "Invalid tool arguments.",
+      details: { issues: zerr.issues ?? [] },
+    };
+  }
   const message = err instanceof Error ? err.message : String(err);
   return {
     ok: false,

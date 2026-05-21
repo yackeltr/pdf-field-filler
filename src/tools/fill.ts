@@ -52,19 +52,7 @@ export interface FillResult extends PdfIdentity {
   skipped: { field_name: string; reason: string }[];
 }
 
-function timestamp(): string {
-  const d = new Date();
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  return (
-    d.getFullYear().toString() +
-    pad(d.getMonth() + 1) +
-    pad(d.getDate()) +
-    "-" +
-    pad(d.getHours()) +
-    pad(d.getMinutes()) +
-    pad(d.getSeconds())
-  );
-}
+import { timestamp } from "../utils.js";
 
 function isSkipValue(v: unknown): boolean {
   return v === null || v === undefined;
@@ -139,9 +127,21 @@ function validateLegalValue(field: FieldInfo, proposed: unknown):
   | { ok: false; reason: string; legal_options: string[] } {
   switch (field.type) {
     case "text": {
-      if (typeof proposed === "string") return { ok: true, normalized: proposed };
-      if (typeof proposed === "number") return { ok: true, normalized: String(proposed) };
-      return { ok: false, reason: "Text fields accept string or number.", legal_options: [] };
+      let s: string | null = null;
+      if (typeof proposed === "string") s = proposed;
+      else if (typeof proposed === "number") s = String(proposed);
+      else return { ok: false, reason: "Text fields accept string or number.", legal_options: [] };
+      // Enforce AcroForm /MaxLen at fill time. pdf-lib's setText does not
+      // honor MaxLen, and viewers that do enforce it will either clip the
+      // value silently or reject the filled PDF.
+      if (field.max_length !== null && s.length > field.max_length) {
+        return {
+          ok: false,
+          reason: `Value length ${s.length} exceeds MaxLen ${field.max_length}.`,
+          legal_options: [],
+        };
+      }
+      return { ok: true, normalized: s };
     }
     case "checkbox": {
       if (typeof proposed === "boolean") return { ok: true, normalized: proposed };

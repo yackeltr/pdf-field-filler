@@ -375,6 +375,80 @@ export async function buildDropdownPairsPdf(): Promise<FixturePaths> {
   return { dir, pdf };
 }
 
+export async function buildCircularKidsPdf(): Promise<FixturePaths> {
+  // Pathological: two field dicts whose /Kids point at each other. A naive
+  // recursive walker would loop forever. Both nodes carry /T so the walker
+  // treats each as a parent with kids-as-fields. Cycle = stack overflow
+  // without a guard.
+  const doc = await PDFDocument.create();
+  doc.addPage([612, 792]);
+  const ctx = doc.context;
+
+  const a = ctx.obj({}) as PDFDict;
+  a.set(PDFName.of("T"), PDFString.of("A"));
+  a.set(PDFName.of("FT"), PDFName.of("Tx"));
+  const aRef = ctx.register(a);
+
+  const b = ctx.obj({}) as PDFDict;
+  b.set(PDFName.of("T"), PDFString.of("B"));
+  b.set(PDFName.of("FT"), PDFName.of("Tx"));
+  const bRef = ctx.register(b);
+
+  const aKids = ctx.obj([]) as PDFArray;
+  aKids.push(bRef);
+  a.set(PDFName.of("Kids"), aKids);
+
+  const bKids = ctx.obj([]) as PDFArray;
+  bKids.push(aRef); // cycle
+  b.set(PDFName.of("Kids"), bKids);
+
+  const af = ctx.obj({}) as PDFDict;
+  const fields = ctx.obj([]) as PDFArray;
+  fields.push(aRef);
+  af.set(PDFName.of("Fields"), fields);
+  doc.catalog.set(PDFName.of("AcroForm"), af);
+
+  const bytes = await doc.save();
+  const dir = mkdtempSync(path.join(tmpdir(), "pdffieldfiller-"));
+  const pdf = path.join(dir, "cycle.pdf");
+  writeFileSync(pdf, bytes);
+  return { dir, pdf };
+}
+
+export async function buildMaxLenPdf(): Promise<FixturePaths> {
+  // Single text field with /MaxLen = 5.
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const ctx = doc.context;
+
+  const w = ctx.obj({}) as PDFDict;
+  w.set(PDFName.of("T"), PDFString.of("Short"));
+  w.set(PDFName.of("FT"), PDFName.of("Tx"));
+  w.set(PDFName.of("MaxLen"), PDFNumber.of(5));
+  w.set(PDFName.of("Subtype"), PDFName.of("Widget"));
+  w.set(
+    PDFName.of("Rect"),
+    ctx.obj([PDFNumber.of(50), PDFNumber.of(700), PDFNumber.of(250), PDFNumber.of(720)]) as PDFArray
+  );
+  const ref = ctx.register(w);
+
+  const af = ctx.obj({}) as PDFDict;
+  const fields = ctx.obj([]) as PDFArray;
+  fields.push(ref);
+  af.set(PDFName.of("Fields"), fields);
+  doc.catalog.set(PDFName.of("AcroForm"), af);
+
+  const annots = ctx.obj([]) as PDFArray;
+  annots.push(ref);
+  page.node.set(PDFName.of("Annots"), annots);
+
+  const bytes = await doc.save();
+  const dir = mkdtempSync(path.join(tmpdir(), "pdffieldfiller-"));
+  const pdf = path.join(dir, "maxlen.pdf");
+  writeFileSync(pdf, bytes);
+  return { dir, pdf };
+}
+
 export async function buildReadOnlyPdf(): Promise<FixturePaths> {
   const doc = await PDFDocument.create();
   const page = doc.addPage([612, 792]);
